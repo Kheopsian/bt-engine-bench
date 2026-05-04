@@ -74,23 +74,39 @@ func Run(ctx context.Context, sc *scenario.Scenario, drivers []engine.Driver, wo
 	}
 	var artefacts []swarmArtefact
 	for i, sw := range sc.Swarm {
-		torrentPath, payloadPath, torrentName, err := materialiseSwarm(workDir, i, sw, trackerURL)
-		if err != nil {
-			return fmt.Errorf("runner: swarm[%d]: %w", i, err)
+		count := sw.Count
+		if count <= 0 {
+			count = 1
+		}
+		if count > 1 && sw.PayloadPath != "" {
+			return fmt.Errorf("runner: swarm[%d]: count > 1 forbids payload_path (each torrent needs its own random payload)", i)
 		}
 		seeders := map[string]bool{}
 		for _, name := range sw.Seeders {
 			seeders[name] = true
 		}
-		artefacts = append(artefacts, swarmArtefact{
-			entry: scenario.TorrentEntry{
-				File:     torrentPath,
-				SavePath: "swarm",
-			},
-			payloadPath: payloadPath,
-			torrentName: torrentName,
-			seeders:     seeders,
-		})
+		// Quiet the per-torrent generation log when count is large —
+		// printing 5000 lines drowns the run output and is useless once
+		// the pattern is established.
+		quiet := count > 16
+		for c := 0; c < count; c++ {
+			torrentPath, payloadPath, torrentName, err := materialiseSwarm(workDir, i, c, sw, trackerURL, quiet)
+			if err != nil {
+				return fmt.Errorf("runner: swarm[%d][%d]: %w", i, c, err)
+			}
+			artefacts = append(artefacts, swarmArtefact{
+				entry: scenario.TorrentEntry{
+					File:     torrentPath,
+					SavePath: "swarm",
+				},
+				payloadPath: payloadPath,
+				torrentName: torrentName,
+				seeders:     seeders,
+			})
+		}
+		if quiet {
+			log.Printf("runner: swarm[%d] generated %d torrents (per-torrent logs suppressed)", i, count)
+		}
 	}
 
 	// Phase 1 — bring up each engine. We assign each one a unique data
@@ -215,12 +231,15 @@ func Run(ctx context.Context, sc *scenario.Scenario, drivers []engine.Driver, wo
 }
 
 // materialiseSwarm generates one synthetic .torrent for a SwarmEntry and
-// writes it under workDir/swarm/<idx>.torrent. The payload either pre-exists
-// (caller-supplied path) or is freshly randomised in workDir/swarm/<idx>.bin.
+// writes it under workDir/swarm/<idx>-<sub>.torrent. Sub is the per-entry
+// expansion index (0..Count-1) — a single SwarmEntry with Count > 1 lays
+// down Count distinct torrents that share the entry's settings but each
+// have their own random payload (so each has a unique info_hash).
+//
 // Returns the .torrent path, the payload path on disk, and the torrent's
 // info.name (= payload basename) — all three are needed by the runner to
 // stage seeders.
-func materialiseSwarm(workDir string, idx int, sw scenario.SwarmEntry, trackerURL string) (string, string, string, error) {
+func materialiseSwarm(workDir string, idx, sub int, sw scenario.SwarmEntry, trackerURL string, quiet bool) (string, string, string, error) {
 	swarmDir := filepath.Join(workDir, "swarm")
 	if err := os.MkdirAll(swarmDir, 0o755); err != nil {
 		return "", "", "", fmt.Errorf("mkdir swarm dir: %w", err)
@@ -236,7 +255,7 @@ func materialiseSwarm(workDir string, idx int, sw scenario.SwarmEntry, trackerUR
 		// the info_hash differs every invocation.
 		suffix := make([]byte, 4)
 		_, _ = rand.Read(suffix)
-		payloadPath = filepath.Join(swarmDir, fmt.Sprintf("payload-%d-%s.bin", idx, hex.EncodeToString(suffix)))
+		payloadPath = filepath.Join(swarmDir, fmt.Sprintf("payload-%d-%d-%s.bin", idx, sub, hex.EncodeToString(suffix)))
 		f, err := os.Create(payloadPath)
 		if err != nil {
 			return "", "", "", fmt.Errorf("create payload: %w", err)
@@ -256,13 +275,15 @@ func materialiseSwarm(workDir string, idx int, sw scenario.SwarmEntry, trackerUR
 	if err != nil {
 		return "", "", "", err
 	}
-	torrentPath := filepath.Join(swarmDir, fmt.Sprintf("%d.torrent", idx))
+	torrentPath := filepath.Join(swarmDir, fmt.Sprintf("%d-%d.torrent", idx, sub))
 	if err := os.WriteFile(torrentPath, res.Torrent, 0o644); err != nil {
 		return "", "", "", fmt.Errorf("write torrent: %w", err)
 	}
 	torrentName := filepath.Base(payloadPath)
-	log.Printf("runner: swarm[%d] generated: payload=%s torrent=%s info_hash=%x size=%d",
-		idx, payloadPath, torrentPath, res.InfoHash, res.Size)
+	if !quiet {
+		log.Printf("runner: swarm[%d][%d] generated: payload=%s torrent=%s info_hash=%x size=%d",
+			idx, sub, payloadPath, torrentPath, res.InfoHash, res.Size)
+	}
 	return torrentPath, payloadPath, torrentName, nil
 }
 

@@ -65,9 +65,17 @@ type Scenario struct {
 // scenario. Either PayloadSize (random bytes generated at run start) or
 // PayloadPath (existing file) is required.
 type SwarmEntry struct {
+	// Count is how many distinct torrents this entry expands to. Each
+	// gets its own random payload (so its own info_hash) but shares
+	// the entry's PayloadSize, PieceLength, and Seeders. Zero or one
+	// behaves identically. Used by hoard-scale scenarios that load
+	// thousands of small torrents per engine.
+	Count int `json:"count"`
+
 	// PayloadSize, in bytes. The runner writes a random payload of
 	// this size to the run's working directory. Mutually exclusive
-	// with PayloadPath.
+	// with PayloadPath. With Count > 1, PayloadPath cannot be set:
+	// every torrent needs its own random payload to differ in info_hash.
 	PayloadSize int64 `json:"payload_size"`
 
 	// PayloadPath is an existing file on disk to wrap. Path must be

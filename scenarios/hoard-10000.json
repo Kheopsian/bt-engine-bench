@@ -1,0 +1,9 @@
+{
+  "name": "hoard-10000",
+  "duration": "60s",
+  "sample_interval": "5s",
+  "tracker": "builtin",
+  "tracker_listen": "0.0.0.0:6969",
+  "swarm": [{"count": 10000, "payload_size": 32768, "seeders": []}],
+  "constraints": {"disable_dht": true, "disable_pex": true, "disable_lsd": true}
+}
