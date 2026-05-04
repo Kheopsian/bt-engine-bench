@@ -1,0 +1,9 @@
+/bench
+*.csv
+*.png
+*.svg
+.vscode/
+.idea/
+*.log
+runs/
+data/
