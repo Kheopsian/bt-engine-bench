@@ -59,7 +59,7 @@ Run 'bench compare -h' for the flag list.`)
 
 func runCompare(args []string) {
 	fs := flag.NewFlagSet("compare", flag.ExitOnError)
-	enginesArg := fs.String("engines", "", "comma-separated engine names (typhon, rqbit)")
+	enginesArg := fs.String("engines", "", "comma-separated engine names (typhon, rqbit, transmission)")
 	scenarioPath := fs.String("scenario", "", "path to scenario JSON")
 	output := fs.String("output", "run.csv", "output CSV path")
 	workDir := fs.String("work-dir", "", "working dir for engine state (default: temp)")
@@ -67,6 +67,9 @@ func runCompare(args []string) {
 	rqbitImage := fs.String("rqbit-image", "ikatson/rqbit:latest", "Docker image for rqbit (only required if 'rqbit' is in --engines)")
 	rqbitAPIPort := fs.Int("rqbit-api-port", 13030, "host-side port for rqbit HTTP API")
 	rqbitListenPort := fs.Int("rqbit-listen-port", 14240, "host-side port for rqbit BitTorrent listen")
+	trImage := fs.String("transmission-image", "linuxserver/transmission:latest", "Docker image for transmission")
+	trAPIPort := fs.Int("transmission-api-port", 19091, "host-side port for transmission RPC")
+	trListenPort := fs.Int("transmission-listen-port", 19092, "host-side port for transmission BitTorrent listen")
 	_ = fs.Parse(args)
 
 	if *enginesArg == "" || *scenarioPath == "" {
@@ -93,7 +96,11 @@ func runCompare(args []string) {
 		log.Fatal(err)
 	}
 
-	drivers, err := buildDrivers(*enginesArg, *typhonBin, *rqbitImage, *rqbitAPIPort, *rqbitListenPort)
+	drivers, err := buildDrivers(*enginesArg,
+		*typhonBin,
+		*rqbitImage, *rqbitAPIPort, *rqbitListenPort,
+		*trImage, *trAPIPort, *trListenPort,
+	)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -122,7 +129,11 @@ func runCompare(args []string) {
 
 // buildDrivers translates the --engines flag into concrete Driver values,
 // returning a stable error message if the user asked for an unknown name.
-func buildDrivers(list, typhonBin, rqbitImage string, rqbitAPIPort, rqbitListenPort int) ([]engine.Driver, error) {
+func buildDrivers(
+	list, typhonBin string,
+	rqbitImage string, rqbitAPIPort, rqbitListenPort int,
+	trImage string, trAPIPort, trListenPort int,
+) ([]engine.Driver, error) {
 	var out []engine.Driver
 	for _, name := range strings.Split(list, ",") {
 		name = strings.TrimSpace(name)
@@ -135,10 +146,16 @@ func buildDrivers(list, typhonBin, rqbitImage string, rqbitAPIPort, rqbitListenP
 			d.HostAPIPort = rqbitAPIPort
 			d.HostListenPort = rqbitListenPort
 			out = append(out, d)
+		case "transmission":
+			d := engine.NewTransmissionDriver()
+			d.Image = trImage
+			d.HostPort = trAPIPort
+			d.HostListenPort = trListenPort
+			out = append(out, d)
 		case "":
 			continue
 		default:
-			return nil, fmt.Errorf("unknown engine %q (supported: typhon, rqbit)", name)
+			return nil, fmt.Errorf("unknown engine %q (supported: typhon, rqbit, transmission)", name)
 		}
 	}
 	if len(out) == 0 {
