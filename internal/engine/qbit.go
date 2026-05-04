@@ -61,6 +61,14 @@ func NewQbitDriver() *QbitDriver {
 
 func (d *QbitDriver) Name() string { return "libtorrent" }
 
+// SeedPath implements engine.Seeder. qBittorrent rechecks files on add
+// when it sees the data already in place, so we mirror the typhon
+// convention: payload lands at savePath/<torrent_name>. SavePath in
+// the qbit driver is mapped to /downloads/<rel> inside the container.
+func (d *QbitDriver) SeedPath(savePath, torrentName string) string {
+	return filepath.Join(savePath, torrentName)
+}
+
 func (d *QbitDriver) Start(ctx context.Context, cfg StartConfig) error {
 	d.cfg = cfg
 	d.container = fmt.Sprintf("bench-qbit-%d", time.Now().UnixNano())
@@ -75,18 +83,24 @@ func (d *QbitDriver) Start(ctx context.Context, cfg StartConfig) error {
 	if err := os.MkdirAll(confDir, 0o755); err != nil {
 		return fmt.Errorf("qbit: mkdir conf: %w", err)
 	}
-	conf := []byte(`[LegalNotice]
+	// WebUI port = HostPort so each instance owns a distinct port on
+	// the host network namespace. Other knobs are the same auth-bypass
+	// trio that lets the harness drive qbit without juggling cookies.
+	conf := []byte(fmt.Sprintf(`[LegalNotice]
 Accepted=true
+
+[BitTorrent]
+Session\Port=%d
 
 [Preferences]
 WebUI\AuthSubnetWhitelistEnabled=true
 WebUI\AuthSubnetWhitelist=0.0.0.0/0
 WebUI\LocalHostAuth=false
-WebUI\Port=8080
+WebUI\Port=%d
 WebUI\Username=bench
 WebUI\CSRFProtection=false
 WebUI\HostHeaderValidation=false
-`)
+`, cfg.ListenPort, d.HostPort))
 	confPath := filepath.Join(confDir, "qBittorrent.conf")
 	if err := os.WriteFile(confPath, conf, 0o644); err != nil {
 		return fmt.Errorf("qbit: write conf: %w", err)
@@ -99,17 +113,18 @@ WebUI\HostHeaderValidation=false
 		return fmt.Errorf("qbit: mkdir downloads: %w", err)
 	}
 
+	// --network host: same rationale as rqbit/rtorrent. WebUI and BT
+	// listen ports come from the conf above so each engine instance
+	// owns its own slice of host ports.
 	args := []string{
 		"run", "-d",
 		"--name", d.container,
-		"-p", fmt.Sprintf("%d:8080", d.HostPort),
-		"-p", fmt.Sprintf("%d:%d", d.HostListenPort, cfg.ListenPort),
-		"-p", fmt.Sprintf("%d:%d/udp", d.HostListenPort, cfg.ListenPort),
+		"--network", "host",
 		"-v", fmt.Sprintf("%s:/config", d.configDir),
 		"-v", fmt.Sprintf("%s:/downloads", downloadsDir),
 		"-e", "PUID=1000",
 		"-e", "PGID=1000",
-		"-e", fmt.Sprintf("WEBUI_PORT=%d", 8080),
+		"-e", fmt.Sprintf("WEBUI_PORT=%d", d.HostPort),
 		d.Image,
 	}
 	cmd := exec.CommandContext(ctx, "docker", args...)

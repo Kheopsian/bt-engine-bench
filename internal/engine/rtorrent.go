@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -59,6 +60,16 @@ func NewRtorrentDriver() *RtorrentDriver {
 
 func (d *RtorrentDriver) Name() string { return "rtorrent" }
 
+// SeedPath implements engine.Seeder. With our `directory.default.set=
+// /rtorrent/data` config and the host volume mount /rtorrent → DataDir,
+// the host path that the engine reads as /rtorrent/data/<name> is
+// DataDir/data/<name>. The runner does not normally pass that subdir;
+// here we honour it so a staged file lands where rtorrent looks.
+func (d *RtorrentDriver) SeedPath(savePath, torrentName string) string {
+	_ = savePath
+	return filepath.Join(d.cfg.DataDir, "data", torrentName)
+}
+
 func (d *RtorrentDriver) Start(ctx context.Context, cfg StartConfig) error {
 	d.cfg = cfg
 	d.container = fmt.Sprintf("bench-rt-%d", time.Now().UnixNano())
@@ -70,18 +81,24 @@ func (d *RtorrentDriver) Start(ctx context.Context, cfg StartConfig) error {
 	// default rc entirely and supply only the knobs we care about,
 	// including TCP SCGI on 0.0.0.0:5000 so the harness can reach it
 	// via Docker port mapping.
+	// --network host so rtorrent listens directly on the host network.
+	// Cross-engine swarm scenarios need this for the same reason rqbit
+	// does — the in-process tracker advertises 127.0.0.1 and other
+	// engines reach this rtorrent instance via that loopback.
+	//
+	// We therefore bind the SCGI listener to the per-instance host
+	// port (no -p mapping translation), and tell rtorrent's port range
+	// to use cfg.ListenPort directly.
 	args := []string{
 		"run", "-d",
 		"--name", d.container,
-		"-p", fmt.Sprintf("%d:5000", d.HostSCGIPort),
-		"-p", fmt.Sprintf("%d:%d", d.HostListenPort, cfg.ListenPort),
-		"-p", fmt.Sprintf("%d:%d/udp", d.HostListenPort, cfg.ListenPort),
+		"--network", "host",
 		"-v", fmt.Sprintf("%s:/rtorrent", cfg.DataDir),
 		"--user", "0:0",
 		d.Image,
 		"-n",
 		"-o", "system.daemon.set=true",
-		"-o", "network.scgi.open_port=0.0.0.0:5000",
+		"-o", fmt.Sprintf("network.scgi.open_port=0.0.0.0:%d", d.HostSCGIPort),
 		"-o", fmt.Sprintf("network.port_range.set=%d-%d", cfg.ListenPort, cfg.ListenPort),
 		"-o", "session.path.set=/rtorrent/sess",
 		"-o", "directory.default.set=/rtorrent/data",
