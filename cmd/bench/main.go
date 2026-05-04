@@ -59,7 +59,7 @@ Run 'bench compare -h' for the flag list.`)
 
 func runCompare(args []string) {
 	fs := flag.NewFlagSet("compare", flag.ExitOnError)
-	enginesArg := fs.String("engines", "", "comma-separated engine names (typhon, rqbit, transmission)")
+	enginesArg := fs.String("engines", "", "comma-separated engine names (typhon, rqbit, transmission, libtorrent)")
 	scenarioPath := fs.String("scenario", "", "path to scenario JSON")
 	output := fs.String("output", "run.csv", "output CSV path")
 	workDir := fs.String("work-dir", "", "working dir for engine state (default: temp)")
@@ -70,6 +70,9 @@ func runCompare(args []string) {
 	trImage := fs.String("transmission-image", "linuxserver/transmission:latest", "Docker image for transmission")
 	trAPIPort := fs.Int("transmission-api-port", 19091, "host-side port for transmission RPC")
 	trListenPort := fs.Int("transmission-listen-port", 19092, "host-side port for transmission BitTorrent listen")
+	qbImage := fs.String("qbit-image", "linuxserver/qbittorrent:latest", "Docker image for qbittorrent (libtorrent stand-in)")
+	qbAPIPort := fs.Int("qbit-api-port", 18080, "host-side port for qbit WebUI")
+	qbListenPort := fs.Int("qbit-listen-port", 18881, "host-side port for qbit BitTorrent listen")
 	_ = fs.Parse(args)
 
 	if *enginesArg == "" || *scenarioPath == "" {
@@ -100,6 +103,7 @@ func runCompare(args []string) {
 		*typhonBin,
 		*rqbitImage, *rqbitAPIPort, *rqbitListenPort,
 		*trImage, *trAPIPort, *trListenPort,
+		*qbImage, *qbAPIPort, *qbListenPort,
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -133,6 +137,7 @@ func buildDrivers(
 	list, typhonBin string,
 	rqbitImage string, rqbitAPIPort, rqbitListenPort int,
 	trImage string, trAPIPort, trListenPort int,
+	qbImage string, qbAPIPort, qbListenPort int,
 ) ([]engine.Driver, error) {
 	var out []engine.Driver
 	for _, name := range strings.Split(list, ",") {
@@ -152,10 +157,16 @@ func buildDrivers(
 			d.HostPort = trAPIPort
 			d.HostListenPort = trListenPort
 			out = append(out, d)
+		case "libtorrent":
+			d := engine.NewQbitDriver()
+			d.Image = qbImage
+			d.HostPort = qbAPIPort
+			d.HostListenPort = qbListenPort
+			out = append(out, d)
 		case "":
 			continue
 		default:
-			return nil, fmt.Errorf("unknown engine %q (supported: typhon, rqbit, transmission)", name)
+			return nil, fmt.Errorf("unknown engine %q (supported: typhon, rqbit, transmission, libtorrent)", name)
 		}
 	}
 	if len(out) == 0 {
