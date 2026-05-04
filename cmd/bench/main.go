@@ -10,8 +10,11 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -24,6 +27,7 @@ import (
 	"github.com/Kheopsian/bt-engine-bench/internal/metrics"
 	"github.com/Kheopsian/bt-engine-bench/internal/runner"
 	"github.com/Kheopsian/bt-engine-bench/internal/scenario"
+	"github.com/Kheopsian/bt-engine-bench/internal/torrentgen"
 )
 
 func main() {
@@ -35,6 +39,8 @@ func main() {
 	switch os.Args[1] {
 	case "compare":
 		runCompare(os.Args[2:])
+	case "gentorrent":
+		runGentorrent(os.Args[2:])
 	case "version":
 		fmt.Println("bt-engine-bench dev")
 	case "help", "-h", "--help":
@@ -50,11 +56,77 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `bt-engine-bench — cross-engine BitTorrent benchmark harness
 
 Usage:
-  bench compare [flags]    Run the same scenario across multiple engines.
-  bench version            Print version.
-  bench help               Show this help.
+  bench compare [flags]      Run the same scenario across multiple engines.
+  bench gentorrent [flags]   Build a .torrent file from a payload.
+  bench version              Print version.
+  bench help                 Show this help.
 
-Run 'bench compare -h' for the flag list.`)
+Run 'bench compare -h' or 'bench gentorrent -h' for flag lists.`)
+}
+
+// runGentorrent assembles a .torrent file. Two input modes:
+//   - --payload PATH  : wrap an existing file
+//   - --random N      : generate a random payload of N bytes first, then wrap it
+//
+// Random payloads are deterministic-looking from outside (hex-named files
+// with predictable size) but their content is fresh each run — fine for a
+// bench, since two engines downloading the same `--random` torrent always
+// see the same hashes within one harness invocation.
+func runGentorrent(args []string) {
+	fs := flag.NewFlagSet("gentorrent", flag.ExitOnError)
+	payload := fs.String("payload", "", "path to existing payload file")
+	randomBytes := fs.Int64("random", 0, "generate a random payload of N bytes (alternative to --payload)")
+	out := fs.String("out", "", "output .torrent path (required)")
+	payloadOut := fs.String("payload-out", "", "where to write the random payload (only with --random; defaults to <out>.payload)")
+	pieceLen := fs.Int64("piece-length", 256*1024, "piece length in bytes")
+	announce := fs.String("announce", "", "tracker URL (optional)")
+	name := fs.String("name", "", "torrent name (defaults to payload basename)")
+	_ = fs.Parse(args)
+
+	if *out == "" || (*payload == "" && *randomBytes == 0) {
+		fs.Usage()
+		os.Exit(2)
+	}
+
+	srcPath := *payload
+	if *randomBytes > 0 {
+		dest := *payloadOut
+		if dest == "" {
+			dest = *out + ".payload"
+		}
+		if err := writeRandomPayload(dest, *randomBytes); err != nil {
+			log.Fatalf("gentorrent: %v", err)
+		}
+		srcPath = dest
+		log.Printf("gentorrent: wrote %d random bytes to %s", *randomBytes, dest)
+	}
+
+	res, err := torrentgen.GenerateFile(torrentgen.Spec{
+		PayloadPath: srcPath,
+		PieceLength: *pieceLen,
+		AnnounceURL: *announce,
+		Name:        *name,
+	})
+	if err != nil {
+		log.Fatalf("gentorrent: %v", err)
+	}
+	if err := os.WriteFile(*out, res.Torrent, 0o644); err != nil {
+		log.Fatalf("gentorrent: write %s: %v", *out, err)
+	}
+	log.Printf("gentorrent: wrote %s — info_hash=%s size=%d bytes",
+		*out, hex.EncodeToString(res.InfoHash[:]), res.Size)
+}
+
+func writeRandomPayload(path string, size int64) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create payload: %w", err)
+	}
+	defer f.Close()
+	if _, err := io.CopyN(f, rand.Reader, size); err != nil {
+		return fmt.Errorf("write random bytes: %w", err)
+	}
+	return nil
 }
 
 func runCompare(args []string) {
