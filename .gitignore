@@ -2,6 +2,7 @@
 *.csv
 *.png
 *.svg
+!docs/*.png
 .vscode/
 .idea/
 *.log
