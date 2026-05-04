@@ -39,25 +39,37 @@ documented in the source comments matches what the engine actually emits.
   single run with consistent CSV schema
 - Built-in BEP-3 HTTP tracker handles real announces from real engines
 - Torrent generator builds valid `.torrent` files (round-tripped through rqbit)
-- **Cross-engine data transfer working** for typhon-as-seeder ↔
-  rain-as-leecher: 5 MiB transferred end-to-end in ~5 seconds, captured
-  in CSV and plotted (see below)
+- **Cross-engine data transfer working** end-to-end across mixed engines.
+  Reference 5-engine run (typhon seeds, four leechers): typhon uploads
+  10 MiB serving rain + libtorrent + rqbit, rqbit then re-uploads
+  another 5 MiB to the rest of the swarm.
 
-![typhon→rain swarm seed transfer](docs/swarm-seed-typhon-rain.png)
+![5-engine swarm with typhon seeding](docs/swarm-seed-5way.png)
+
+```
+engine           UL total     DL total
+libtorrent          0.0 B      5.0 MiB
+rain                0.0 B      5.0 MiB
+rqbit             5.0 MiB      5.0 MiB    ← re-upload to swarm
+rtorrent            0.0 B        0.0 B    ← see Pending
+typhon           10.0 MiB        0.0 B    ← seeder
+```
 
 **Pending** (PRs welcome):
 
-- `seed_mode` wiring for the rest of the drivers. typhon honours
-  `TorrentSpec.Seed` via the `seed_mode` flag of its `add_torrent` RPC;
-  libtorrent (qbit-nox) has the same flag and just needs the qbit
-  driver to forward it. rqbit/transmission/rtorrent will trigger their
-  own auto-recheck on add, so a `RecheckTorrent(infoHash)` follow-up
-  call in the runner is the right shape for those.
-- Container engines (rqbit, transmission, qbit-nox, rtorrent) currently
-  use Docker bridge networking. Proper cross-engine swarm scenarios
-  with those engines require `--network host` so they can reach the
-  loopback tracker advertised by the runner. A driver refactor pass is
-  needed.
+- rtorrent participates as a peer in the tracker view but never starts
+  data transfer in our scenarios. Likely a tracker-handshake or
+  choking config issue specific to rtorrent's defaults. The driver
+  spawns clean and accepts torrents; the gap is in the engine-side
+  config our `-n` minimal rc skips.
+- transmission still uses Docker bridge networking. The other four
+  container drivers (rqbit, qbit-nox, rtorrent) are now `--network
+  host`. Refactoring transmission needs touching its `settings.json`
+  generation pre-spawn since the linuxserver image regenerates the
+  conf on first boot.
+- `seed_mode` is wired through `TorrentSpec.Seed` and honoured by
+  typhon. libtorrent (qbit-nox) has the same flag and just needs the
+  driver to forward it.
 
 ## Quick start
 
