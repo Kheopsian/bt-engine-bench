@@ -39,21 +39,25 @@ documented in the source comments matches what the engine actually emits.
   single run with consistent CSV schema
 - Built-in BEP-3 HTTP tracker handles real announces from real engines
 - Torrent generator builds valid `.torrent` files (round-tripped through rqbit)
+- **Cross-engine data transfer working** for typhon-as-seeder ↔
+  rain-as-leecher: 5 MiB transferred end-to-end in ~5 seconds, captured
+  in CSV and plotted (see below)
+
+![typhon→rain swarm seed transfer](docs/swarm-seed-typhon-rain.png)
 
 **Pending** (PRs welcome):
 
-- End-to-end data transfer in `swarm` scenarios. Engines connect via the
-  built-in tracker (`peers_connected = 1` confirmed across pairs) but
-  the seeder→leecher byte transfer needs per-engine tuning of choking
-  defaults / verify timing — likely 1-2 hours of investigation per
-  engine pair.
+- `seed_mode` wiring for the rest of the drivers. typhon honours
+  `TorrentSpec.Seed` via the `seed_mode` flag of its `add_torrent` RPC;
+  libtorrent (qbit-nox) has the same flag and just needs the qbit
+  driver to forward it. rqbit/transmission/rtorrent will trigger their
+  own auto-recheck on add, so a `RecheckTorrent(infoHash)` follow-up
+  call in the runner is the right shape for those.
 - Container engines (rqbit, transmission, qbit-nox, rtorrent) currently
   use Docker bridge networking. Proper cross-engine swarm scenarios
-  require `--network host` so they can reach the loopback tracker. A
-  driver refactor pass is needed.
-- Plot scripts produce sensible time-series PNGs but the README has no
-  example-image yet (run `scripts/plot.py` once the swarm scenarios are
-  green).
+  with those engines require `--network host` so they can reach the
+  loopback tracker advertised by the runner. A driver refactor pass is
+  needed.
 
 ## Quick start
 
