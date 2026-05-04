@@ -23,6 +23,22 @@ import (
 // scenario step instead of failing the whole run.
 var ErrUnsupported = errors.New("operation not supported by this engine")
 
+// Seeder is the optional capability a driver advertises when the harness
+// can stage a complete payload on its data dir before AddTorrent. Engines
+// that implement it become candidate seeders for swarm scenarios.
+//
+// SeedPath returns the absolute host path the harness should write the
+// payload to so that, after a subsequent AddTorrent + verify, the engine
+// reports the torrent as 100% complete. The torrent's `info.name` is
+// passed because most engines expect the payload to be at
+// `<save_dir>/<info.name>`.
+//
+// Drivers without this capability cannot be used as seeders; the runner
+// either skips them or fails the scenario depending on configuration.
+type Seeder interface {
+	SeedPath(savePath, torrentName string) string
+}
+
 // Driver is the interface every engine implementation provides.
 type Driver interface {
 	// Name is a stable short identifier (e.g. "typhon", "rqbit",

@@ -60,6 +60,15 @@ func NewRainDriver(binaryPath string) *RainDriver {
 
 func (d *RainDriver) Name() string { return "rain" }
 
+// SeedPath implements engine.Seeder. Rain stores all torrent payload
+// under its global DataDir (it has no per-torrent save_path), so the
+// harness drops the file directly in DataDir/<name>. The savePath
+// argument is ignored on purpose.
+func (d *RainDriver) SeedPath(savePath, torrentName string) string {
+	_ = savePath
+	return filepath.Join(d.cfg.DataDir, torrentName)
+}
+
 func (d *RainDriver) Start(ctx context.Context, cfg StartConfig) error {
 	if d.BinaryPath == "" {
 		return errors.New("rain: BinaryPath is required")
@@ -105,6 +114,12 @@ peexenabled: %t
 	d.cmd = exec.Command(d.BinaryPath, "server", "-c", confPath)
 	d.cmd.Stdout = os.Stdout
 	d.cmd.Stderr = os.Stderr
+	// Force HOME to the per-run data dir so rain's default
+	// ~/.local/share/rain session.db lands inside DataDir and does
+	// NOT bleed across runs. Without this, rain's persistent session
+	// resurrects torrents from previous bench runs and confuses the
+	// tracker about which info_hash is in flight.
+	d.cmd.Env = append(os.Environ(), "HOME="+cfg.DataDir)
 	if err := d.cmd.Start(); err != nil {
 		return fmt.Errorf("rain: start process: %w", err)
 	}

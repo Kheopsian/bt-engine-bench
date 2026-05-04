@@ -63,16 +63,33 @@ func Run(ctx context.Context, sc *scenario.Scenario, drivers []engine.Driver, wo
 	// Phase 0.5 — materialise synthetic torrents from sc.Swarm. Each
 	// SwarmEntry produces one shared .torrent that every engine in the
 	// run will get fed. The payload either pre-exists (PayloadPath) or
-	// gets a freshly randomised buffer (PayloadSize).
-	var swarmTorrents []scenario.TorrentEntry
+	// gets a freshly randomised buffer (PayloadSize). Seeders are
+	// remembered so that Phase 2 can stage the payload on those engines
+	// before issuing AddTorrent.
+	type swarmArtefact struct {
+		entry       scenario.TorrentEntry
+		payloadPath string
+		torrentName string
+		seeders     map[string]bool
+	}
+	var artefacts []swarmArtefact
 	for i, sw := range sc.Swarm {
-		torrentPath, err := materialiseSwarm(workDir, i, sw, trackerURL)
+		torrentPath, payloadPath, torrentName, err := materialiseSwarm(workDir, i, sw, trackerURL)
 		if err != nil {
 			return fmt.Errorf("runner: swarm[%d]: %w", i, err)
 		}
-		swarmTorrents = append(swarmTorrents, scenario.TorrentEntry{
-			File:     torrentPath,
-			SavePath: "swarm",
+		seeders := map[string]bool{}
+		for _, name := range sw.Seeders {
+			seeders[name] = true
+		}
+		artefacts = append(artefacts, swarmArtefact{
+			entry: scenario.TorrentEntry{
+				File:     torrentPath,
+				SavePath: "swarm",
+			},
+			payloadPath: payloadPath,
+			torrentName: torrentName,
+			seeders:     seeders,
 		})
 	}
 
@@ -124,31 +141,38 @@ func Run(ctx context.Context, sc *scenario.Scenario, drivers []engine.Driver, wo
 	// Phase 2 — register torrents on every engine. Each torrent's save
 	// path lives under the per-engine dataDir so that engines do not
 	// share storage and cannot accidentally cooperate via shared files.
-	allTorrents := append([]scenario.TorrentEntry{}, sc.Torrents...)
-	allTorrents = append(allTorrents, swarmTorrents...)
+	// For swarm torrents whose scenario lists this engine as a seeder,
+	// the payload is staged at the driver-specific SeedPath BEFORE
+	// AddTorrent — verify will then mark the torrent complete and the
+	// engine starts seeding instead of leeching.
 	for _, r := range live {
-		for _, t := range allTorrents {
-			meta, err := os.ReadFile(t.File)
-			if err != nil {
-				return fmt.Errorf("runner: read torrent %s: %w", t.File, err)
+		// Legacy torrents (file-on-disk, harness does no payload
+		// staging) — added as-is.
+		for _, t := range sc.Torrents {
+			if err := addOne(ctx, r.driver, r.dataDir, t); err != nil {
+				return err
 			}
-			savePath := t.SavePath
-			if !filepath.IsAbs(savePath) {
-				savePath = filepath.Join(r.dataDir, savePath)
+		}
+		// Swarm torrents — opportunistically seed.
+		for _, art := range artefacts {
+			savePath := filepath.Join(r.dataDir, art.entry.SavePath)
+			if err := os.MkdirAll(savePath, 0o755); err != nil {
+				return fmt.Errorf("runner: mkdir save_path: %w", err)
 			}
-			spec := engine.TorrentSpec{
-				// InfoHash is left empty: drivers that need it
-				// derive it from the torrent metadata themselves
-				// (typhon writes the .torrent to disk with a
-				// time-suffixed name when InfoHash is empty).
-				MetaBytes: meta,
-				SavePath:  savePath,
+			if art.seeders[r.driver.Name()] {
+				seeder, ok := r.driver.(engine.Seeder)
+				if !ok {
+					log.Printf("runner: %s does not implement Seeder, skipping pre-populate", r.driver.Name())
+				} else {
+					dst := seeder.SeedPath(savePath, art.torrentName)
+					if err := copyFile(art.payloadPath, dst); err != nil {
+						return fmt.Errorf("runner: stage seed for %s: %w", r.driver.Name(), err)
+					}
+					log.Printf("runner: staged seed for %s at %s", r.driver.Name(), dst)
+				}
 			}
-			addCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			err = r.driver.AddTorrent(addCtx, spec)
-			cancel()
-			if err != nil {
-				return fmt.Errorf("runner: %s add_torrent %s: %w", r.driver.Name(), t.File, err)
+			if err := addOne(ctx, r.driver, r.dataDir, art.entry); err != nil {
+				return err
 			}
 		}
 	}
@@ -191,18 +215,19 @@ func Run(ctx context.Context, sc *scenario.Scenario, drivers []engine.Driver, wo
 // materialiseSwarm generates one synthetic .torrent for a SwarmEntry and
 // writes it under workDir/swarm/<idx>.torrent. The payload either pre-exists
 // (caller-supplied path) or is freshly randomised in workDir/swarm/<idx>.bin.
-// Returns the path to the .torrent (which the runner then loads into every
-// engine just like a manually-supplied torrent).
-func materialiseSwarm(workDir string, idx int, sw scenario.SwarmEntry, trackerURL string) (string, error) {
+// Returns the .torrent path, the payload path on disk, and the torrent's
+// info.name (= payload basename) — all three are needed by the runner to
+// stage seeders.
+func materialiseSwarm(workDir string, idx int, sw scenario.SwarmEntry, trackerURL string) (string, string, string, error) {
 	swarmDir := filepath.Join(workDir, "swarm")
 	if err := os.MkdirAll(swarmDir, 0o755); err != nil {
-		return "", fmt.Errorf("mkdir swarm dir: %w", err)
+		return "", "", "", fmt.Errorf("mkdir swarm dir: %w", err)
 	}
 
 	payloadPath := sw.PayloadPath
 	if payloadPath == "" {
 		if sw.PayloadSize <= 0 {
-			return "", fmt.Errorf("either payload_path or payload_size must be set")
+			return "", "", "", fmt.Errorf("either payload_path or payload_size must be set")
 		}
 		// Hex suffix keeps multi-swarm scenarios distinguishable on
 		// disk; the bytes inside are still freshly random per run so
@@ -212,11 +237,11 @@ func materialiseSwarm(workDir string, idx int, sw scenario.SwarmEntry, trackerUR
 		payloadPath = filepath.Join(swarmDir, fmt.Sprintf("payload-%d-%s.bin", idx, hex.EncodeToString(suffix)))
 		f, err := os.Create(payloadPath)
 		if err != nil {
-			return "", fmt.Errorf("create payload: %w", err)
+			return "", "", "", fmt.Errorf("create payload: %w", err)
 		}
 		if _, err := io.CopyN(f, rand.Reader, sw.PayloadSize); err != nil {
 			f.Close()
-			return "", fmt.Errorf("write random payload: %w", err)
+			return "", "", "", fmt.Errorf("write random payload: %w", err)
 		}
 		f.Close()
 	}
@@ -227,15 +252,16 @@ func materialiseSwarm(workDir string, idx int, sw scenario.SwarmEntry, trackerUR
 		AnnounceURL: trackerURL,
 	})
 	if err != nil {
-		return "", err
+		return "", "", "", err
 	}
 	torrentPath := filepath.Join(swarmDir, fmt.Sprintf("%d.torrent", idx))
 	if err := os.WriteFile(torrentPath, res.Torrent, 0o644); err != nil {
-		return "", fmt.Errorf("write torrent: %w", err)
+		return "", "", "", fmt.Errorf("write torrent: %w", err)
 	}
+	torrentName := filepath.Base(payloadPath)
 	log.Printf("runner: swarm[%d] generated: payload=%s torrent=%s info_hash=%x size=%d",
 		idx, payloadPath, torrentPath, res.InfoHash, res.Size)
-	return torrentPath, nil
+	return torrentPath, payloadPath, torrentName, nil
 }
 
 // splitHostPort accepts both "host:port" and ":port" and returns the two
@@ -249,4 +275,48 @@ func splitHostPort(s string) (host, port string, ok bool) {
 		}
 	}
 	return "", s, false
+}
+
+// addOne is the per-(engine, torrent) add helper extracted so that the
+// runner's Phase 2 loop can interleave seed-staging without duplicating
+// the AddTorrent boilerplate.
+func addOne(ctx context.Context, d engine.Driver, dataDir string, t scenario.TorrentEntry) error {
+	meta, err := os.ReadFile(t.File)
+	if err != nil {
+		return fmt.Errorf("runner: read torrent %s: %w", t.File, err)
+	}
+	savePath := t.SavePath
+	if !filepath.IsAbs(savePath) {
+		savePath = filepath.Join(dataDir, savePath)
+	}
+	spec := engine.TorrentSpec{
+		MetaBytes: meta,
+		SavePath:  savePath,
+	}
+	addCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := d.AddTorrent(addCtx, spec); err != nil {
+		return fmt.Errorf("runner: %s add_torrent %s: %w", d.Name(), t.File, err)
+	}
+	return nil
+}
+
+// copyFile streams src to dst. Used for seed staging where the payload
+// can be larger than RAM. Truncates any existing file at dst.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
 }

@@ -57,6 +57,13 @@ func NewTyphonDriver(binaryPath string) *TyphonDriver {
 
 func (d *TyphonDriver) Name() string { return "typhon" }
 
+// SeedPath implements engine.Seeder. typhon reads payload directly from
+// the host filesystem (no container indirection), so the path the harness
+// drops the payload at IS the path typhon will see during verify.
+func (d *TyphonDriver) SeedPath(savePath, torrentName string) string {
+	return filepath.Join(savePath, torrentName)
+}
+
 // typhonConfig is the JSON document hydra-engine reads from --config. The
 // Rust side deserialises this with serde_json's strict-ish defaults — many
 // fields are NOT optional, so the harness has to populate sane values for

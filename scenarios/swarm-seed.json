@@ -1,0 +1,18 @@
+{
+  "name": "swarm-seed",
+  "duration": "60s",
+  "sample_interval": "1s",
+  "tracker": "builtin",
+  "tracker_listen": "0.0.0.0:6969",
+  "swarm": [
+    {
+      "payload_size": 5242880,
+      "seeders": ["typhon"]
+    }
+  ],
+  "constraints": {
+    "disable_dht": true,
+    "disable_pex": true,
+    "disable_lsd": true
+  }
+}
