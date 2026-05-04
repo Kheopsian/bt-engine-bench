@@ -59,7 +59,7 @@ Run 'bench compare -h' for the flag list.`)
 
 func runCompare(args []string) {
 	fs := flag.NewFlagSet("compare", flag.ExitOnError)
-	enginesArg := fs.String("engines", "", "comma-separated engine names (typhon, rqbit, transmission, libtorrent)")
+	enginesArg := fs.String("engines", "", "comma-separated engine names (typhon, rqbit, transmission, libtorrent, rain)")
 	scenarioPath := fs.String("scenario", "", "path to scenario JSON")
 	output := fs.String("output", "run.csv", "output CSV path")
 	workDir := fs.String("work-dir", "", "working dir for engine state (default: temp)")
@@ -73,6 +73,8 @@ func runCompare(args []string) {
 	qbImage := fs.String("qbit-image", "linuxserver/qbittorrent:latest", "Docker image for qbittorrent (libtorrent stand-in)")
 	qbAPIPort := fs.Int("qbit-api-port", 18080, "host-side port for qbit WebUI")
 	qbListenPort := fs.Int("qbit-listen-port", 18881, "host-side port for qbit BitTorrent listen")
+	rainBin := fs.String("rain-bin", "/usr/local/bin/rain", "path to cenkalti/rain binary (only required if 'rain' is in --engines)")
+	rainRPCPort := fs.Int("rain-rpc-port", 17246, "host-side port for rain JSON-RPC")
 	_ = fs.Parse(args)
 
 	if *enginesArg == "" || *scenarioPath == "" {
@@ -104,6 +106,7 @@ func runCompare(args []string) {
 		*rqbitImage, *rqbitAPIPort, *rqbitListenPort,
 		*trImage, *trAPIPort, *trListenPort,
 		*qbImage, *qbAPIPort, *qbListenPort,
+		*rainBin, *rainRPCPort,
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -138,6 +141,7 @@ func buildDrivers(
 	rqbitImage string, rqbitAPIPort, rqbitListenPort int,
 	trImage string, trAPIPort, trListenPort int,
 	qbImage string, qbAPIPort, qbListenPort int,
+	rainBin string, rainRPCPort int,
 ) ([]engine.Driver, error) {
 	var out []engine.Driver
 	for _, name := range strings.Split(list, ",") {
@@ -163,10 +167,14 @@ func buildDrivers(
 			d.HostPort = qbAPIPort
 			d.HostListenPort = qbListenPort
 			out = append(out, d)
+		case "rain":
+			d := engine.NewRainDriver(rainBin)
+			d.HostRPCPort = rainRPCPort
+			out = append(out, d)
 		case "":
 			continue
 		default:
-			return nil, fmt.Errorf("unknown engine %q (supported: typhon, rqbit, transmission, libtorrent)", name)
+			return nil, fmt.Errorf("unknown engine %q (supported: typhon, rqbit, transmission, libtorrent, rain)", name)
 		}
 	}
 	if len(out) == 0 {
