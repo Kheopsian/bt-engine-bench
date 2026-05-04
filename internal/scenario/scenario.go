@@ -33,12 +33,57 @@ type Scenario struct {
 	// engine.
 	SampleInterval Duration `json:"sample_interval"`
 
-	// Torrents is the workload: each entry will be added to every
-	// engine the run covers.
+	// Torrents is the legacy workload: each entry refers to a .torrent
+	// file that already exists on disk. Engines load the torrent but
+	// the harness does NOT pre-populate any payload — useful for "idle
+	// engine" measurement, useless for throughput scenarios.
 	Torrents []TorrentEntry `json:"torrents"`
+
+	// Tracker controls the bench's in-process HTTP tracker. Values:
+	//   ""        — disabled
+	//   "builtin" — runner starts a tracker on TrackerListen and
+	//               embeds its URL into every Swarm-generated .torrent
+	Tracker string `json:"tracker"`
+
+	// TrackerListen is the host:port the builtin tracker binds to.
+	// Defaults to "0.0.0.0:6969". The runner advertises the same port
+	// to engines via the announce URL.
+	TrackerListen string `json:"tracker_listen"`
+
+	// Swarm describes torrents the harness should generate at runtime.
+	// Each entry produces one synthetic .torrent shared across every
+	// engine in the run. Seeders are pre-populated with the full
+	// payload before AddTorrent — they start at 100% and only upload.
+	// Other engines start at 0% and leech.
+	Swarm []SwarmEntry `json:"swarm"`
 
 	// Constraints applied identically to every engine.
 	Constraints Constraints `json:"constraints"`
+}
+
+// SwarmEntry describes one synthetic torrent the runner generates for the
+// scenario. Either PayloadSize (random bytes generated at run start) or
+// PayloadPath (existing file) is required.
+type SwarmEntry struct {
+	// PayloadSize, in bytes. The runner writes a random payload of
+	// this size to the run's working directory. Mutually exclusive
+	// with PayloadPath.
+	PayloadSize int64 `json:"payload_size"`
+
+	// PayloadPath is an existing file on disk to wrap. Path must be
+	// readable from the harness host.
+	PayloadPath string `json:"payload_path"`
+
+	// PieceLength forwarded to torrentgen. Zero means default
+	// (256 KiB). Tune for scenarios that care about piece-pipeline
+	// behaviour.
+	PieceLength int64 `json:"piece_length"`
+
+	// Seeders is the list of engine names that start the run already
+	// holding a complete copy of the payload. Engines NOT in this
+	// list start empty and have to download. Empty seeders means
+	// nobody seeds — the swarm will sit idle.
+	Seeders []string `json:"seeders"`
 }
 
 // TorrentEntry describes one torrent the harness should hand to each engine.
