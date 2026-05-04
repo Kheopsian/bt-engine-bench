@@ -57,18 +57,140 @@ func NewTyphonDriver(binaryPath string) *TyphonDriver {
 
 func (d *TyphonDriver) Name() string { return "typhon" }
 
-// typhonConfig is the JSON document hydra-engine reads from --config. We
-// expose only the knobs a benchmark scenario actually controls; everything
-// else picks up engine defaults.
+// typhonConfig is the JSON document hydra-engine reads from --config. The
+// Rust side deserialises this with serde_json's strict-ish defaults — many
+// fields are NOT optional, so the harness has to populate sane values for
+// every knob even when a scenario does not care about that knob. The defaults
+// below mirror BuildHoardConfig in hydra-go (engine_process.go), with the
+// production-only bits (proxy_v2, socks5) stripped.
 type typhonConfig struct {
-	DataDir              string `json:"data_dir"`
-	ResumeDir            string `json:"resume_dir"`
-	ListenPort           int    `json:"listen_port"`
-	MaxConnections       int    `json:"max_connections,omitempty"`
-	MaxConnsPerTorrent   int    `json:"max_connections_per_torrent,omitempty"`
-	EnableDHT            bool   `json:"enable_dht"`
-	EnablePEX            bool   `json:"enable_pex"`
-	EnableLSD            bool   `json:"enable_lsd"`
+	DataDir   string `json:"data_dir"`
+	ResumeDir string `json:"resume_dir"`
+
+	ListenPort int `json:"listen_port"`
+
+	// Connection limits.
+	MaxConnections           int `json:"max_connections"`
+	MaxConnectionsPerTorrent int `json:"max_connections_per_torrent"`
+	MaxUploadsPerTorrent     int `json:"max_uploads_per_torrent"`
+
+	// Choking.
+	UnchokeSlots         int    `json:"unchoke_slots"`
+	OptimisticUnchoke    int    `json:"optimistic_unchoke"`
+	UnchokeInterval      int    `json:"unchoke_interval"`
+	ChokingAlgorithm     string `json:"choking_algorithm"`
+	SeedChokingAlgorithm string `json:"seed_choking_algorithm"`
+
+	// Send buffers.
+	SendBufferWatermark       int `json:"send_buffer_watermark"`
+	SendBufferLowWatermark    int `json:"send_buffer_low_watermark"`
+	SendBufferWatermarkFactor int `json:"send_buffer_watermark_factor"`
+
+	// Timeouts.
+	RequestTimeout    int `json:"request_timeout"`
+	PeerConnTimeout   int `json:"peer_connect_timeout"`
+	HandshakeTimeout  int `json:"handshake_timeout"`
+	PeerTimeout       int `json:"peer_timeout"`
+	InactivityTimeout int `json:"inactivity_timeout"`
+
+	// Peer management.
+	ConnectionSpeed      int `json:"connection_speed"`
+	PeerTurnover         int `json:"peer_turnover"`
+	PeerTurnoverInterval int `json:"peer_turnover_interval"`
+	PeerTurnoverCutoff   int `json:"peer_turnover_cutoff"`
+	AllowedFastSetSize   int `json:"allowed_fast_set_size"`
+
+	// Features. NB: typhon names these dht_enabled / pex_enabled, NOT
+	// the more obvious enable_dht / enable_pex.
+	DHTEnabled    bool   `json:"dht_enabled"`
+	PEXEnabled    bool   `json:"pex_enabled"`
+	SuggestMode   int    `json:"suggest_mode"`
+	MixedModeAlgo string `json:"mixed_mode_algorithm"`
+
+	// Advanced.
+	MaxAllowedInRequestQueue int `json:"max_allowed_in_request_queue"`
+	SendNotSentLowWatermark  int `json:"send_not_sent_low_watermark"`
+
+	// Identity. Required by typhon; harness uses a dedicated fingerprint
+	// so production peer_id intel does not get muddled with bench traffic.
+	PeerFingerprint string `json:"peer_fingerprint"`
+	UserAgent       string `json:"user_agent"`
+
+	// Hydra-flavoured behaviour we keep off in the bench: the Go
+	// orchestrator's announce loop is not present here, so let typhon
+	// announce itself.
+	DisableInternalAnnounce bool `json:"disable_internal_announce"`
+
+	// I/O.
+	AIOThreads      int `json:"aio_threads"`
+	FilePoolSize    int `json:"file_pool_size"`
+	CacheSizeBlocks int `json:"cache_size_blocks"`
+	CacheExpiry     int `json:"cache_expiry"`
+
+	// Rate limits — 0 = unlimited.
+	UploadLimit   int `json:"upload_limit"`
+	DownloadLimit int `json:"download_limit"`
+}
+
+// defaultTyphonConfig returns the bench-friendly config. Callers fill in
+// the dynamic fields (DataDir, ListenPort, …) on top.
+func defaultTyphonConfig() typhonConfig {
+	return typhonConfig{
+		// Connection limits — modest defaults so a bench host with
+		// limited fd budget can run several engines in parallel.
+		MaxConnections:           4000,
+		MaxConnectionsPerTorrent: 50,
+		MaxUploadsPerTorrent:     -1,
+
+		// Choking.
+		UnchokeSlots:         50,
+		OptimisticUnchoke:    0,
+		UnchokeInterval:      15,
+		ChokingAlgorithm:     "fixed_slots",
+		SeedChokingAlgorithm: "round_robin",
+
+		// Send buffers (mirror libtorrent defaults).
+		SendBufferWatermark:       33554432,
+		SendBufferLowWatermark:    8388608,
+		SendBufferWatermarkFactor: 200,
+
+		// Timeouts.
+		RequestTimeout:    45,
+		PeerConnTimeout:   10,
+		HandshakeTimeout:  15,
+		PeerTimeout:       300,
+		InactivityTimeout: 300,
+
+		// Peer management.
+		ConnectionSpeed:      500,
+		PeerTurnover:         0,
+		PeerTurnoverInterval: 120,
+		PeerTurnoverCutoff:   90,
+		AllowedFastSetSize:   0,
+
+		// Features.
+		DHTEnabled:    true,
+		PEXEnabled:    true,
+		SuggestMode:   1,
+		MixedModeAlgo: "prefer_tcp",
+
+		// Advanced.
+		MaxAllowedInRequestQueue: 2000,
+		SendNotSentLowWatermark:  524288,
+
+		// Identity. -BE25H0- is "bench-engine 25 H 0" — Azureus-style,
+		// distinct from any production Hydra peer_id prefix.
+		PeerFingerprint: "-BE25H0-",
+		UserAgent:       "bt-engine-bench/dev",
+
+		DisableInternalAnnounce: false,
+
+		// I/O.
+		AIOThreads:      32,
+		FilePoolSize:    5000,
+		CacheSizeBlocks: 65536,
+		CacheExpiry:     300,
+	}
 }
 
 func (d *TyphonDriver) Start(ctx context.Context, cfg StartConfig) error {
@@ -96,16 +218,23 @@ func (d *TyphonDriver) Start(ctx context.Context, cfg StartConfig) error {
 	d.socket = filepath.Join(d.SocketDir, "typhon.sock")
 	configPath := filepath.Join(d.SocketDir, "typhon.config.json")
 
-	conf := typhonConfig{
-		DataDir:            cfg.DataDir,
-		ResumeDir:          resumeDir,
-		ListenPort:         cfg.ListenPort,
-		MaxConnections:     cfg.MaxTotalConnections,
-		MaxConnsPerTorrent: cfg.MaxPeersPerTorrent,
-		EnableDHT:          !cfg.DisableDHT,
-		EnablePEX:          !cfg.DisablePEX,
-		EnableLSD:          !cfg.DisableLSD,
+	conf := defaultTyphonConfig()
+	conf.DataDir = cfg.DataDir
+	conf.ResumeDir = resumeDir
+	conf.ListenPort = cfg.ListenPort
+	if cfg.MaxTotalConnections > 0 {
+		conf.MaxConnections = cfg.MaxTotalConnections
 	}
+	if cfg.MaxPeersPerTorrent > 0 {
+		conf.MaxConnectionsPerTorrent = cfg.MaxPeersPerTorrent
+	}
+	if cfg.DisableDHT {
+		conf.DHTEnabled = false
+	}
+	if cfg.DisablePEX {
+		conf.PEXEnabled = false
+	}
+	// typhon does not implement LSD; cfg.DisableLSD is informational.
 	confBytes, err := json.MarshalIndent(conf, "", "  ")
 	if err != nil {
 		return fmt.Errorf("typhon: marshal config: %w", err)
@@ -114,9 +243,13 @@ func (d *TyphonDriver) Start(ctx context.Context, cfg StartConfig) error {
 		return fmt.Errorf("typhon: write config: %w", err)
 	}
 
-	// Spawn the engine. Stdout/Stderr are forwarded so the harness's
-	// log captures any panic from the engine side directly.
-	d.cmd = exec.CommandContext(ctx, d.BinaryPath, "--config", configPath, "--socket", d.socket)
+	// Spawn the engine. We do NOT bind the cmd to the Start ctx — that
+	// ctx typically has a short startup-timeout deadline, and once the
+	// caller cancels it (right after Start returns) exec.CommandContext
+	// would send SIGKILL to the engine. The driver owns the engine
+	// process for the full Start..Stop lifetime; Stop() handles the
+	// graceful shutdown explicitly.
+	d.cmd = exec.Command(d.BinaryPath, "--config", configPath, "--socket", d.socket)
 	d.cmd.Stdout = os.Stdout
 	d.cmd.Stderr = os.Stderr
 	if err := d.cmd.Start(); err != nil {
@@ -163,6 +296,14 @@ func (d *TyphonDriver) connect(ctx context.Context, timeout time.Duration) error
 
 // readLoop consumes newline-delimited JSON frames from the engine and routes
 // each response to the goroutine that issued the matching request.
+//
+// Wire format (typhon-engine v2.5.x): the response is the dispatch result
+// object with an "id" key injected at the top level — NOT a JSON-RPC
+// envelope. So `{"pong": true, "id": 1}` for a ping reply, or
+// `{"error": "missing torrent_path", "id": 2}` for an application error.
+// Pushed events (when a client subscribes) have no "id" and use the
+// shape `{"event": "...", "data": {...}}` — those are silently dropped
+// here since the bench harness does not subscribe.
 func (d *TyphonDriver) readLoop() {
 	br := bufio.NewReader(d.conn)
 	for {
@@ -172,27 +313,20 @@ func (d *TyphonDriver) readLoop() {
 			d.failPending(err)
 			return
 		}
-		var resp struct {
-			ID    int64           `json:"id"`
-			Result json.RawMessage `json:"result"`
-			Error  string          `json:"error"`
+		var probe struct {
+			ID *int64 `json:"id"`
 		}
-		if jerr := json.Unmarshal(line, &resp); jerr != nil {
-			continue // ignore malformed frames; engine may emit
-			// out-of-band events someday.
+		if jerr := json.Unmarshal(line, &probe); jerr != nil || probe.ID == nil {
+			continue // event push or malformed; not our concern.
 		}
 		d.pendingM.Lock()
-		ch, ok := d.pending[resp.ID]
-		delete(d.pending, resp.ID)
+		ch, ok := d.pending[*probe.ID]
+		delete(d.pending, *probe.ID)
 		d.pendingM.Unlock()
 		if !ok {
 			continue // orphan response, request goroutine timed out.
 		}
-		if resp.Error != "" {
-			ch <- json.RawMessage(`{"__rpc_error":"` + resp.Error + `"}`)
-		} else {
-			ch <- resp.Result
-		}
+		ch <- line
 	}
 }
 
@@ -270,7 +404,14 @@ func (d *TyphonDriver) AddTorrent(ctx context.Context, t TorrentSpec) error {
 		return errors.New("typhon: TorrentSpec.SavePath is required")
 	}
 	// typhon reads the torrent file from disk, so we materialise it.
-	torrentPath := filepath.Join(d.cfg.DataDir, t.InfoHash+".torrent")
+	// When InfoHash is unknown (the harness does not parse bencode),
+	// disambiguate via timestamp so concurrent AddTorrent calls do not
+	// race on the same filename.
+	name := t.InfoHash
+	if name == "" {
+		name = fmt.Sprintf("torrent-%d", time.Now().UnixNano())
+	}
+	torrentPath := filepath.Join(d.cfg.DataDir, name+".torrent")
 	if err := os.WriteFile(torrentPath, t.MetaBytes, 0o644); err != nil {
 		return fmt.Errorf("typhon: write meta: %w", err)
 	}

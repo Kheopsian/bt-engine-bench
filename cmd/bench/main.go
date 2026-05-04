@@ -1,16 +1,29 @@
 // Command bench is the entry point for the cross-engine BitTorrent
-// benchmark harness. v1 supports a single subcommand:
+// benchmark harness.
 //
-//	bench compare --engines <list> --scenario <path> --duration <go-duration> --output <csv>
-//
-// Subsequent versions will add scenario authoring helpers, replay tooling,
-// and plot generation.
+//	bench compare \
+//	    --engines typhon,rqbit \
+//	    --scenario scenarios/smoke.json \
+//	    --output run.csv \
+//	    --typhon-bin /usr/local/bin/hydra-engine
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"log"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/Kheopsian/bt-engine-bench/internal/engine"
+	"github.com/Kheopsian/bt-engine-bench/internal/metrics"
+	"github.com/Kheopsian/bt-engine-bench/internal/runner"
+	"github.com/Kheopsian/bt-engine-bench/internal/scenario"
 )
 
 func main() {
@@ -39,25 +52,97 @@ func usage() {
 Usage:
   bench compare [flags]    Run the same scenario across multiple engines.
   bench version            Print version.
-  bench help               Show this help.`)
+  bench help               Show this help.
+
+Run 'bench compare -h' for the flag list.`)
 }
 
 func runCompare(args []string) {
 	fs := flag.NewFlagSet("compare", flag.ExitOnError)
-	engines := fs.String("engines", "", "comma-separated engine names (typhon, rqbit, transmission, libtorrent)")
-	scenario := fs.String("scenario", "", "path to scenario YAML")
-	duration := fs.String("duration", "300s", "scenario duration (Go duration syntax)")
+	enginesArg := fs.String("engines", "", "comma-separated engine names (typhon, rqbit)")
+	scenarioPath := fs.String("scenario", "", "path to scenario JSON")
 	output := fs.String("output", "run.csv", "output CSV path")
+	workDir := fs.String("work-dir", "", "working dir for engine state (default: temp)")
+	typhonBin := fs.String("typhon-bin", "/usr/local/bin/hydra-engine", "path to typhon binary (only required if 'typhon' is in --engines)")
+	rqbitImage := fs.String("rqbit-image", "ikatson/rqbit:latest", "Docker image for rqbit (only required if 'rqbit' is in --engines)")
+	rqbitAPIPort := fs.Int("rqbit-api-port", 13030, "host-side port for rqbit HTTP API")
+	rqbitListenPort := fs.Int("rqbit-listen-port", 14240, "host-side port for rqbit BitTorrent listen")
 	_ = fs.Parse(args)
 
-	if *engines == "" || *scenario == "" {
+	if *enginesArg == "" || *scenarioPath == "" {
 		fs.Usage()
 		os.Exit(2)
 	}
 
-	// TODO: load scenario, instantiate drivers, hand off to runner.
-	fmt.Printf("compare: engines=%s scenario=%s duration=%s output=%s\n",
-		*engines, *scenario, *duration, *output)
-	fmt.Fprintln(os.Stderr, "not implemented yet")
-	os.Exit(1)
+	sc, err := scenario.Load(*scenarioPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	wd := *workDir
+	if wd == "" {
+		wd, err = os.MkdirTemp("", "bench-")
+		if err != nil {
+			log.Fatalf("bench: mktempdir: %v", err)
+		}
+		log.Printf("bench: working dir = %s", wd)
+	}
+
+	wd, err = filepath.Abs(wd)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	drivers, err := buildDrivers(*enginesArg, *typhonBin, *rqbitImage, *rqbitAPIPort, *rqbitListenPort)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	out, err := metrics.New(*output, sc.Name)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() {
+		if err := out.Close(); err != nil {
+			log.Printf("bench: close output: %v", err)
+		}
+	}()
+
+	// SIGINT/SIGTERM => cancel context, runner stops + engines tear down.
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	start := time.Now()
+	log.Printf("bench: scenario=%q duration=%s engines=%s", sc.Name, sc.Duration.Std(), *enginesArg)
+	if err := runner.Run(ctx, sc, drivers, wd, out); err != nil {
+		log.Fatalf("bench: %v", err)
+	}
+	log.Printf("bench: done in %s. samples written to %s", time.Since(start).Round(100*time.Millisecond), *output)
+}
+
+// buildDrivers translates the --engines flag into concrete Driver values,
+// returning a stable error message if the user asked for an unknown name.
+func buildDrivers(list, typhonBin, rqbitImage string, rqbitAPIPort, rqbitListenPort int) ([]engine.Driver, error) {
+	var out []engine.Driver
+	for _, name := range strings.Split(list, ",") {
+		name = strings.TrimSpace(name)
+		switch name {
+		case "typhon":
+			out = append(out, engine.NewTyphonDriver(typhonBin))
+		case "rqbit":
+			d := engine.NewRqbitDriver()
+			d.Image = rqbitImage
+			d.HostAPIPort = rqbitAPIPort
+			d.HostListenPort = rqbitListenPort
+			out = append(out, d)
+		case "":
+			continue
+		default:
+			return nil, fmt.Errorf("unknown engine %q (supported: typhon, rqbit)", name)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no engines selected")
+	}
+	return out, nil
 }

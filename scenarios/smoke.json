@@ -1,0 +1,11 @@
+{
+  "name": "smoke",
+  "duration": "30s",
+  "sample_interval": "1s",
+  "torrents": [],
+  "constraints": {
+    "disable_dht": true,
+    "disable_pex": true,
+    "disable_lsd": true
+  }
+}
