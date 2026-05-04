@@ -96,6 +96,7 @@ func (d *TransmissionDriver) Start(ctx context.Context, cfg StartConfig) error {
   "rpc-whitelist-enabled": false,
   "peer-port": %d,
   "peer-port-random-on-start": false,
+  "download-dir": "/downloads",
   "dht-enabled": %t,
   "pex-enabled": %t,
   "lpd-enabled": %t
@@ -107,14 +108,20 @@ func (d *TransmissionDriver) Start(ctx context.Context, cfg StartConfig) error {
 
 	// --network host so our chosen RPC+peer ports bind directly on
 	// the host's loopback view — same rationale as rqbit/qbit/rtorrent.
+	// PUID/PGID=0 runs the daemon as root inside the container; the
+	// runner creates per-torrent SavePath subdirs as root and a non-root
+	// transmission would silently fail every disk write (bytes still
+	// arrive on the wire and increment downloadedEver, but the .part
+	// file never lands and the engine eventually pauses with "No data
+	// found"). rtorrent driver uses --user 0:0 for the same reason.
 	args := []string{
 		"run", "-d",
 		"--name", d.container,
 		"--network", "host",
 		"-v", fmt.Sprintf("%s:/config", configDir),
 		"-v", fmt.Sprintf("%s:/downloads", cfg.DataDir),
-		"-e", "PUID=1000",
-		"-e", "PGID=1000",
+		"-e", "PUID=0",
+		"-e", "PGID=0",
 		d.Image,
 	}
 	cmd := exec.CommandContext(ctx, "docker", args...)
@@ -276,7 +283,9 @@ type trTorrentGet struct {
 	Result    string `json:"result"`
 	Arguments struct {
 		Torrents []struct {
-			PeersConnected int `json:"peersConnected"`
+			PeersConnected int   `json:"peersConnected"`
+			DownloadedEver int64 `json:"downloadedEver"`
+			UploadedEver   int64 `json:"uploadedEver"`
 		} `json:"torrents"`
 	} `json:"arguments"`
 }
@@ -293,14 +302,21 @@ func (d *TransmissionDriver) Stats(ctx context.Context) (Stats, error) {
 		return Stats{}, fmt.Errorf("transmission: decode session-stats: %w", err)
 	}
 
-	// Peers connected — not in session-stats. Fan out to torrent-get
-	// with only the "peersConnected" field; transmission returns an
-	// array even for sessions with no torrents.
+	// Per-torrent fan-out covers two gaps in session-stats:
+	//   - peersConnected isn't aggregated there
+	//   - cumulative-stats.{down,up}loadedBytes is *lifetime across daemon
+	//     restarts*, persisted in stats.json. The linuxserver image does
+	//     not preserve stats.json across our throwaway containers, so the
+	//     field reads back as 0 on every fresh bench. torrent-get's
+	//     downloadedEver / uploadedEver are per-torrent lifetime counters
+	//     baked into the resume file and survive RPC restarts within a
+	//     single bench run.
 	var peers int
+	var dlEver, ulEver int64
 	body, _ = json.Marshal(map[string]interface{}{
 		"method": "torrent-get",
 		"arguments": map[string]interface{}{
-			"fields": []string{"peersConnected"},
+			"fields": []string{"peersConnected", "downloadedEver", "uploadedEver"},
 		},
 	})
 	if raw, err := d.rpc(ctx, body); err == nil {
@@ -308,6 +324,8 @@ func (d *TransmissionDriver) Stats(ctx context.Context) (Stats, error) {
 		if err := json.Unmarshal(raw, &tg); err == nil {
 			for _, t := range tg.Arguments.Torrents {
 				peers += t.PeersConnected
+				dlEver += t.DownloadedEver
+				ulEver += t.UploadedEver
 			}
 		}
 	}
@@ -315,8 +333,8 @@ func (d *TransmissionDriver) Stats(ctx context.Context) (Stats, error) {
 	return Stats{
 		UploadRate:      uint64(ss.Arguments.UploadSpeed),
 		DownloadRate:    uint64(ss.Arguments.DownloadSpeed),
-		UploadedTotal:   uint64(ss.Arguments.CumulativeStats.UploadedBytes),
-		DownloadedTotal: uint64(ss.Arguments.CumulativeStats.DownloadedBytes),
+		UploadedTotal:   uint64(ulEver),
+		DownloadedTotal: uint64(dlEver),
 		TorrentsTotal:   ss.Arguments.TorrentCount,
 		TorrentsActive:  ss.Arguments.ActiveTorrentCount,
 		PeersConnected:  peers,
