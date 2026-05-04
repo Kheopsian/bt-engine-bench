@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -60,19 +61,37 @@ func NewRqbitDriver() *RqbitDriver {
 
 func (d *RqbitDriver) Name() string { return "rqbit" }
 
+// SeedPath implements engine.Seeder. rqbit auto-rechecks files on add,
+// so dropping the payload at savePath/<name> is enough — the engine
+// discovers the data and switches to seeding without an explicit flag.
+func (d *RqbitDriver) SeedPath(savePath, torrentName string) string {
+	return filepath.Join(savePath, torrentName)
+}
+
 func (d *RqbitDriver) Start(ctx context.Context, cfg StartConfig) error {
 	d.cfg = cfg
 	d.container = fmt.Sprintf("bench-rqbit-%d", time.Now().UnixNano())
 	d.baseURL = fmt.Sprintf("http://127.0.0.1:%d", d.HostAPIPort)
 
+	// --network host so rqbit binds directly on the host's network
+	// namespace. Cross-engine swarm scenarios need this: the bench's
+	// in-process tracker advertises peers on 127.0.0.1, and rqbit's
+	// TCP listener has to be reachable on that same loopback view by
+	// other engines. Bridge mode would put rqbit on a private docker
+	// IP unreachable from host-process engines and give it a false
+	// 127.0.0.1 view of itself.
 	args := []string{
 		"run", "-d",
 		"--name", d.container,
-		"-p", fmt.Sprintf("%d:3030", d.HostAPIPort),
-		"-p", fmt.Sprintf("%d:4240", d.HostListenPort),
+		"--network", "host",
 		"-v", fmt.Sprintf("%s:/data", cfg.DataDir),
 		d.Image,
-		"--http-api-listen-addr", "0.0.0.0:3030",
+		"--http-api-listen-addr", fmt.Sprintf("0.0.0.0:%d", d.HostAPIPort),
+		// rqbit needs a 2+ port range when binding both v4 and v6.
+		// Using the same value for min and max triggered "no free
+		// TCP ports" on the dual-stack code path.
+		"--tcp-min-port", strconv.Itoa(d.HostListenPort),
+		"--tcp-max-port", strconv.Itoa(d.HostListenPort + 5),
 	}
 	if cfg.DisableDHT {
 		args = append(args, "--disable-dht")
