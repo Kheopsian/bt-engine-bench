@@ -1,6 +1,6 @@
 {
   "name": "swarm-seed",
-  "duration": "60s",
+  "duration": "180s",
   "sample_interval": "1s",
   "tracker": "builtin",
   "tracker_listen": "0.0.0.0:6969",

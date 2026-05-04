@@ -39,37 +39,37 @@ documented in the source comments matches what the engine actually emits.
   single run with consistent CSV schema
 - Built-in BEP-3 HTTP tracker handles real announces from real engines
 - Torrent generator builds valid `.torrent` files (round-tripped through rqbit)
-- **Cross-engine data transfer working** end-to-end across mixed engines.
-  Reference 5-engine run (typhon seeds, four leechers): typhon uploads
-  10 MiB serving rain + libtorrent + rqbit, rqbit then re-uploads
-  another 5 MiB to the rest of the swarm.
-
-![5-engine swarm with typhon seeding](docs/swarm-seed-5way.png)
+- **All 6 engines transfer data** end-to-end in the same swarm.
+  Reference 6-engine run (typhon seeds 50 MiB to five leechers, 180 s
+  duration): every leecher reaches the full payload, and rqbit + typhon
+  both re-upload to other peers in the swarm.
 
 ```
-engine           UL total     DL total
-libtorrent          0.0 B      5.0 MiB
-rain                0.0 B      5.0 MiB
-rqbit             5.0 MiB      5.0 MiB    ← re-upload to swarm
-rtorrent            0.0 B        0.0 B    ← see Pending
-typhon           10.0 MiB        0.0 B    ← seeder
+engine          UL total      DL total
+typhon         157.3 MiB         0.0 B    ← seeder (served 3 leechers directly)
+rqbit           50.0 MiB      50.0 MiB    ← re-upload to swarm
+rain                0.0 B     50.0 MiB
+libtorrent          0.0 B     50.0 MiB
+rtorrent        50.1 MiB      50.2 MiB    ← also seeded back after completion
+transmission        0.0 B     50.0 MiB
 ```
+
+Caveat: rtorrent is the slowest engine to boot + announce, so short
+scenarios (≤ 60 s) will frequently show it stuck at zero bytes simply
+because typhon has already finished serving the faster handshakers
+(rqbit, rain) before rtorrent enters the swarm. The bundled
+`scenarios/swarm-seed.json` runs for 180 s precisely to give rtorrent
+time to engage.
 
 **Pending** (PRs welcome):
 
-- rtorrent participates as a peer in the tracker view but never starts
-  data transfer in our scenarios. Likely a tracker-handshake or
-  choking config issue specific to rtorrent's defaults. The driver
-  spawns clean and accepts torrents; the gap is in the engine-side
-  config our `-n` minimal rc skips.
-- transmission still uses Docker bridge networking. The other four
-  container drivers (rqbit, qbit-nox, rtorrent) are now `--network
-  host`. Refactoring transmission needs touching its `settings.json`
-  generation pre-spawn since the linuxserver image regenerates the
-  conf on first boot.
 - `seed_mode` is wired through `TorrentSpec.Seed` and honoured by
   typhon. libtorrent (qbit-nox) has the same flag and just needs the
   driver to forward it.
+- Multi-engine swarms could converge faster if the runner waited for
+  every engine's BT listen socket to be live before kicking off Phase 2
+  announces, instead of relying on each driver's own readiness
+  heuristic.
 
 ## Quick start
 
