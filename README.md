@@ -1,58 +1,146 @@
 # bt-engine-bench
 
-Cross-engine BitTorrent benchmark harness. Spawns each engine headless via
-its native RPC, drives an identical workload, and exports normalised metrics
-for direct comparison.
+Cross-engine BitTorrent benchmark harness. Spawns each supported engine
+headless via its native RPC, drives an identical workload, and exports
+normalised metrics so you can plot apples-to-apples comparisons.
 
-## Why
+## Why it exists
 
-There is no widely accepted BitTorrent engine benchmark. Existing comparisons
-are anecdotal forum posts measuring the wrapping client (UI, storage I/O,
-queue scheduler) rather than the engine itself. Academic interest peaked
-around 2005-2010 with simulation-based work that never reflected real
-implementations.
-
-Worse: published numbers focus on the easy case — single torrent, max
-throughput, foreground download. The interesting workloads (5k-15k torrents
-seeding simultaneously with sparse peer activity) are never measured.
+There is no widely accepted BitTorrent engine benchmark. The "comparisons"
+you can find online are forum posts that measure the wrapping client
+(UI rendering, storage I/O, queue scheduler) rather than the engine,
+or academic papers from 2005-2010 that simulated swarms in tools nobody
+runs anymore. None of them touch the workloads that matter to
+seedbox-class deployments — thousands of torrents seeded in parallel,
+sparse peer activity, sustained throughput over hours.
 
 This harness fills that gap.
 
-## Design
+## Engines covered
 
-- Each engine is treated as a black box driven through its native API
-  (libtorrent C++ via qbittorrent-nox Web API, rqbit HTTP, transmission RPC,
-  typhon JSON-RPC over Unix socket).
-- Engines run in Docker containers for reproducibility.
-- A shared scenario specification injects identical torrent sets, peer pools,
-  and timing into every engine.
-- Metrics are collected at fixed intervals from the engine's own stats API
-  and normalised into a flat CSV. No engine-specific knobs leak into the
-  output schema.
-- Plot scripts (Python) render comparative charts from the CSV.
+| Engine                            | Language | Concurrency model       | Driver mechanism            |
+|-----------------------------------|----------|-------------------------|-----------------------------|
+| [typhon](https://github.com/Kheopsian/Hydra) | Rust     | tokio async             | Unix socket JSON-RPC        |
+| [rqbit](https://github.com/ikatson/rqbit)    | Rust     | state-machine           | HTTP API                    |
+| [rain](https://github.com/cenkalti/rain)     | Go       | 1 goroutine per peer    | HTTP JSON-RPC 2.0           |
+| [transmission](https://transmissionbt.com/)  | C        | daemon RPC              | HTTP w/ session-id refresh  |
+| libtorrent (via [qBittorrent-nox](https://www.qbittorrent.org/)) | C++ | Boost.Asio | WebUI auth-bypass |
+| [rtorrent](https://github.com/jesec/rtorrent) | C++     | xmlrpc-c                | SCGI XML-RPC                |
+
+Every driver has been validated against the real engine — the wire format
+documented in the source comments matches what the engine actually emits.
 
 ## Status
 
-WIP. v1 target: typhon + rqbit + transmission + libtorrent (via qbit-nox).
+**Alpha**, publishable. The harness scaffolding is solid:
 
-## Engines covered
+- All 6 drivers spawn, accept torrents, and report normalised stats
+- 6-way idle smoke runs cleanly: each engine produces ~30 samples in a
+  single run with consistent CSV schema
+- Built-in BEP-3 HTTP tracker handles real announces from real engines
+- Torrent generator builds valid `.torrent` files (round-tripped through rqbit)
 
-| Engine        | Driver mechanism            | Status |
-|---------------|-----------------------------|--------|
-| typhon        | JSON-RPC over Unix socket   | TODO   |
-| rqbit         | HTTP API                    | TODO   |
-| transmission  | RPC daemon                  | TODO   |
-| libtorrent    | qbittorrent-nox Web API     | TODO   |
+**Pending** (PRs welcome):
 
-## Usage
+- End-to-end data transfer in `swarm` scenarios. Engines connect via the
+  built-in tracker (`peers_connected = 1` confirmed across pairs) but
+  the seeder→leecher byte transfer needs per-engine tuning of choking
+  defaults / verify timing — likely 1-2 hours of investigation per
+  engine pair.
+- Container engines (rqbit, transmission, qbit-nox, rtorrent) currently
+  use Docker bridge networking. Proper cross-engine swarm scenarios
+  require `--network host` so they can reach the loopback tracker. A
+  driver refactor pass is needed.
+- Plot scripts produce sensible time-series PNGs but the README has no
+  example-image yet (run `scripts/plot.py` once the swarm scenarios are
+  green).
+
+## Quick start
+
+```sh
+# Build the harness binary.
+go build -o bench ./cmd/bench
+
+# Acquire engine binaries and images. typhon and rain need binary paths;
+# the rest are pulled as Docker images on first run.
+docker pull ikatson/rqbit:latest
+docker pull linuxserver/transmission:latest
+docker pull linuxserver/qbittorrent:latest
+docker pull jesec/rtorrent:latest
+
+# Run the 30-second idle smoke across all six engines.
+./bench compare \
+  --engines typhon,rqbit,transmission,libtorrent,rain,rtorrent \
+  --scenario scenarios/smoke.json \
+  --output run.csv \
+  --typhon-bin /path/to/hydra-engine \
+  --rain-bin /path/to/rain
+
+# Plot the result.
+pip install -r scripts/requirements.txt
+python scripts/plot.py run.csv run.png
+```
+
+## Generating synthetic torrents
+
+The harness ships a `gentorrent` helper for hand-built scenarios:
+
+```sh
+./bench gentorrent --random 10485760 --out 10mb.torrent --announce http://localhost:6969/announce
+```
+
+Inside scenarios (`scenarios/swarm-seed.json` is the reference example),
+declare a synthetic swarm and let the runner build everything at run start:
+
+```json
+{
+  "name": "10mb-typhon-seeds-everyone-leeches",
+  "duration": "120s",
+  "sample_interval": "1s",
+  "tracker": "builtin",
+  "swarm": [
+    { "payload_size": 10485760, "seeders": ["typhon"] }
+  ]
+}
+```
+
+## Architecture
 
 ```
-bench compare \
-  --engines typhon,rqbit \
-  --scenario scenarios/hoard_seed_1k.yaml \
-  --duration 300s \
-  --output run.csv
+cmd/bench/main.go              CLI: compare, gentorrent
+internal/
+  engine/                      Driver interface + 6 implementations
+  scenario/                    JSON scenario format
+  runner/                      Orchestrates Start → AddTorrent → sample → Stop
+  metrics/                     Flat-CSV writer with stable schema
+  bencode/                     Minimal encoder (.torrent is bencoded)
+  torrentgen/                  Builds .torrent files from a payload
+  tracker/                     In-process BEP-3 HTTP tracker
+scripts/
+  plot.py                      pandas + matplotlib summariser
+scenarios/                     Example scenario JSON files
 ```
+
+Driver selection is closed over by `cmd/bench/main.go`. Adding a new engine
+is a single file in `internal/engine/`, an entry in the `--engines` switch,
+and a smoke test against the real engine.
+
+## Design choices
+
+**JSON, not YAML, for scenarios.** stdlib only, no parser dependency.
+
+**One CSV per run.** Multiple engines share the file with an `engine` column.
+Mixing scenarios in one CSV is supported via the `scenario` column. Plot
+scripts split on those columns.
+
+**Driver isolation.** Each engine gets its own data dir and listen port.
+No two drivers share storage, ports, or peer pools — comparisons stay
+unaffected by accidental cooperation.
+
+**Engines own their config.** The harness exposes a small `StartConfig`
+(data dir, listen port, on/off toggles for DHT/PEX/LSD, peer caps).
+Anything beyond that is the engine's default. This avoids the trap where
+the bench surreptitiously tunes one engine more aggressively than another.
 
 ## License
 
