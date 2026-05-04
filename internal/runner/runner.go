@@ -159,10 +159,12 @@ func Run(ctx context.Context, sc *scenario.Scenario, drivers []engine.Driver, wo
 			if err := os.MkdirAll(savePath, 0o755); err != nil {
 				return fmt.Errorf("runner: mkdir save_path: %w", err)
 			}
-			if art.seeders[r.driver.Name()] {
+			isSeeder := art.seeders[r.driver.Name()]
+			if isSeeder {
 				seeder, ok := r.driver.(engine.Seeder)
 				if !ok {
 					log.Printf("runner: %s does not implement Seeder, skipping pre-populate", r.driver.Name())
+					isSeeder = false
 				} else {
 					dst := seeder.SeedPath(savePath, art.torrentName)
 					if err := copyFile(art.payloadPath, dst); err != nil {
@@ -171,7 +173,7 @@ func Run(ctx context.Context, sc *scenario.Scenario, drivers []engine.Driver, wo
 					log.Printf("runner: staged seed for %s at %s", r.driver.Name(), dst)
 				}
 			}
-			if err := addOne(ctx, r.driver, r.dataDir, art.entry); err != nil {
+			if err := addOneWithSeed(ctx, r.driver, r.dataDir, art.entry, isSeeder); err != nil {
 				return err
 			}
 		}
@@ -281,6 +283,14 @@ func splitHostPort(s string) (host, port string, ok bool) {
 // runner's Phase 2 loop can interleave seed-staging without duplicating
 // the AddTorrent boilerplate.
 func addOne(ctx context.Context, d engine.Driver, dataDir string, t scenario.TorrentEntry) error {
+	return addOneWithSeed(ctx, d, dataDir, t, false)
+}
+
+// addOneWithSeed is addOne plus an explicit seed flag. When seed is true
+// the driver receives TorrentSpec.Seed = true, which engines that support
+// seed_mode (libtorrent, typhon) interpret as "trust the on-disk file is
+// complete, skip the hash check and start seeding immediately".
+func addOneWithSeed(ctx context.Context, d engine.Driver, dataDir string, t scenario.TorrentEntry, seed bool) error {
 	meta, err := os.ReadFile(t.File)
 	if err != nil {
 		return fmt.Errorf("runner: read torrent %s: %w", t.File, err)
@@ -292,6 +302,7 @@ func addOne(ctx context.Context, d engine.Driver, dataDir string, t scenario.Tor
 	spec := engine.TorrentSpec{
 		MetaBytes: meta,
 		SavePath:  savePath,
+		Seed:      seed,
 	}
 	addCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()

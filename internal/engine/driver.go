@@ -106,6 +106,13 @@ type TorrentSpec struct {
 	// SavePath is the directory the engine should write/read payload to.
 	// Must be inside StartConfig.DataDir.
 	SavePath string
+
+	// Seed signals that the harness has staged the complete payload at
+	// SavePath/<info.name> and the engine should trust that and start
+	// seeding without performing a hash check. Engines whose protocol
+	// has a seed_mode flag (libtorrent, typhon) honour it; others can
+	// ignore Seed and rely on their own auto-verify-on-add behaviour.
+	Seed bool
 }
 
 // Stats is the normalised aggregate snapshot every driver returns. Counters

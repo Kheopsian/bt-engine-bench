@@ -429,6 +429,7 @@ func (d *TyphonDriver) AddTorrent(ctx context.Context, t TorrentSpec) error {
 		"torrent_path": torrentPath,
 		"save_path":    t.SavePath,
 		"stopped":      false,
+		"seed_mode":    t.Seed,
 	})
 	if err != nil {
 		return err
