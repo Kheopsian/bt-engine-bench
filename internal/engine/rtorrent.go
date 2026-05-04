@@ -407,9 +407,25 @@ func (d *RtorrentDriver) Stats(ctx context.Context) (Stats, error) {
 	dlTotal, _ := d.callXMLRPC(ctx, "throttle.global_down.total", nil)
 
 	dlList, _ := d.callXMLRPC(ctx, "download_list", nil)
-	var torrentCount int
+	var torrentCount, activeCount, peersTotal int
 	if arr, ok := dlList.([]interface{}); ok {
 		torrentCount = len(arr)
+		for _, h := range arr {
+			hash, _ := h.(string)
+			if hash == "" {
+				continue
+			}
+			if active, err := d.callXMLRPC(ctx, "d.is_active", []interface{}{hash}); err == nil {
+				if n, ok := active.(int64); ok && n > 0 {
+					activeCount++
+				}
+			}
+			if peers, err := d.callXMLRPC(ctx, "d.peers_connected", []interface{}{hash}); err == nil {
+				if n, ok := peers.(int64); ok && n > 0 {
+					peersTotal += int(n)
+				}
+			}
+		}
 	}
 
 	return Stats{
@@ -418,11 +434,8 @@ func (d *RtorrentDriver) Stats(ctx context.Context) (Stats, error) {
 		UploadedTotal:   asUint64(upTotal),
 		DownloadedTotal: asUint64(dlTotal),
 		TorrentsTotal:   torrentCount,
-		// Active torrents and per-engine peer count would require a
-		// per-torrent multicall (`d.peers_connected`); we leave them
-		// at zero for v1 to keep the sample loop cheap.
-		TorrentsActive: 0,
-		PeersConnected: 0,
+		TorrentsActive:  activeCount,
+		PeersConnected:  peersTotal,
 	}, nil
 }
 
