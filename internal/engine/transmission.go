@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -64,20 +66,55 @@ func NewTransmissionDriver() *TransmissionDriver {
 
 func (d *TransmissionDriver) Name() string { return "transmission" }
 
+// SeedPath implements engine.Seeder. transmission rechecks files on add
+// when it sees data already in /downloads/<name>; the volume mapping
+// /downloads → DataDir makes the staged file visible.
+func (d *TransmissionDriver) SeedPath(savePath, torrentName string) string {
+	_ = savePath
+	// transmission's download-dir is /downloads inside the container.
+	// We mount DataDir at /downloads, so the on-host path the engine
+	// reads is DataDir/<torrent_name>.
+	return d.cfg.DataDir + "/" + torrentName
+}
+
 func (d *TransmissionDriver) Start(ctx context.Context, cfg StartConfig) error {
 	d.cfg = cfg
 	d.container = fmt.Sprintf("bench-tr-%d", time.Now().UnixNano())
 	d.baseURL = fmt.Sprintf("http://127.0.0.1:%d/transmission/rpc", d.HostPort)
 
+	// Pre-write a settings.json so the linuxserver image starts with
+	// our chosen RPC + peer ports instead of its defaults (which would
+	// collide on host network mode). The image still adds its own
+	// fields on first boot but preserves existing keys.
+	configDir := fmt.Sprintf("%s/cfg", cfg.DataDir)
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		return fmt.Errorf("transmission: mkdir cfg: %w", err)
+	}
+	settings := fmt.Sprintf(`{
+  "rpc-bind-address": "0.0.0.0",
+  "rpc-port": %d,
+  "rpc-whitelist-enabled": false,
+  "peer-port": %d,
+  "peer-port-random-on-start": false,
+  "dht-enabled": %t,
+  "pex-enabled": %t,
+  "lpd-enabled": %t
+}
+`, d.HostPort, cfg.ListenPort, !cfg.DisableDHT, !cfg.DisablePEX, !cfg.DisableLSD)
+	if err := os.WriteFile(configDir+"/settings.json", []byte(settings), 0o644); err != nil {
+		return fmt.Errorf("transmission: write settings.json: %w", err)
+	}
+
+	// --network host so our chosen RPC+peer ports bind directly on
+	// the host's loopback view — same rationale as rqbit/qbit/rtorrent.
 	args := []string{
 		"run", "-d",
 		"--name", d.container,
-		"-p", fmt.Sprintf("%d:9091", d.HostPort),
-		"-p", fmt.Sprintf("%d:%d", d.HostListenPort, cfg.ListenPort),
-		"-p", fmt.Sprintf("%d:%d/udp", d.HostListenPort, cfg.ListenPort),
+		"--network", "host",
+		"-v", fmt.Sprintf("%s:/config", configDir),
 		"-v", fmt.Sprintf("%s:/downloads", cfg.DataDir),
-		"-e", "TRANSMISSION_WEB_HOME=/transmission-web-control",
-		"-e", fmt.Sprintf("PEERPORT=%d", cfg.ListenPort),
+		"-e", "PUID=1000",
+		"-e", "PGID=1000",
 		d.Image,
 	}
 	cmd := exec.CommandContext(ctx, "docker", args...)
@@ -177,11 +214,17 @@ func (d *TransmissionDriver) AddTorrent(ctx context.Context, t TorrentSpec) erro
 	if t.SavePath == "" {
 		return fmt.Errorf("transmission: TorrentSpec.SavePath is required")
 	}
+	// SavePath is a host path inside DataDir (the volume root). Translate
+	// to the container's view, which sees DataDir mounted at /downloads.
+	containerSavePath := "/downloads"
+	if rel, err := filepath.Rel(d.cfg.DataDir, t.SavePath); err == nil && !strings.HasPrefix(rel, "..") && rel != "." {
+		containerSavePath = "/downloads/" + rel
+	}
 	body, _ := json.Marshal(map[string]interface{}{
 		"method": "torrent-add",
 		"arguments": map[string]interface{}{
 			"metainfo":     base64.StdEncoding.EncodeToString(t.MetaBytes),
-			"download-dir": t.SavePath,
+			"download-dir": containerSavePath,
 			"paused":       false,
 		},
 	})
