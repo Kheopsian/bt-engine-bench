@@ -59,7 +59,7 @@ Run 'bench compare -h' for the flag list.`)
 
 func runCompare(args []string) {
 	fs := flag.NewFlagSet("compare", flag.ExitOnError)
-	enginesArg := fs.String("engines", "", "comma-separated engine names (typhon, rqbit, transmission, libtorrent, rain)")
+	enginesArg := fs.String("engines", "", "comma-separated engine names (typhon, rqbit, transmission, libtorrent, rain, rtorrent)")
 	scenarioPath := fs.String("scenario", "", "path to scenario JSON")
 	output := fs.String("output", "run.csv", "output CSV path")
 	workDir := fs.String("work-dir", "", "working dir for engine state (default: temp)")
@@ -75,6 +75,9 @@ func runCompare(args []string) {
 	qbListenPort := fs.Int("qbit-listen-port", 18881, "host-side port for qbit BitTorrent listen")
 	rainBin := fs.String("rain-bin", "/usr/local/bin/rain", "path to cenkalti/rain binary (only required if 'rain' is in --engines)")
 	rainRPCPort := fs.Int("rain-rpc-port", 17246, "host-side port for rain JSON-RPC")
+	rtImage := fs.String("rtorrent-image", "jesec/rtorrent:latest", "Docker image for rtorrent")
+	rtSCGIPort := fs.Int("rtorrent-scgi-port", 15000, "host-side port for rtorrent SCGI")
+	rtListenPort := fs.Int("rtorrent-listen-port", 15010, "host-side port for rtorrent BitTorrent listen")
 	_ = fs.Parse(args)
 
 	if *enginesArg == "" || *scenarioPath == "" {
@@ -107,6 +110,7 @@ func runCompare(args []string) {
 		*trImage, *trAPIPort, *trListenPort,
 		*qbImage, *qbAPIPort, *qbListenPort,
 		*rainBin, *rainRPCPort,
+		*rtImage, *rtSCGIPort, *rtListenPort,
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -142,6 +146,7 @@ func buildDrivers(
 	trImage string, trAPIPort, trListenPort int,
 	qbImage string, qbAPIPort, qbListenPort int,
 	rainBin string, rainRPCPort int,
+	rtImage string, rtSCGIPort, rtListenPort int,
 ) ([]engine.Driver, error) {
 	var out []engine.Driver
 	for _, name := range strings.Split(list, ",") {
@@ -171,10 +176,16 @@ func buildDrivers(
 			d := engine.NewRainDriver(rainBin)
 			d.HostRPCPort = rainRPCPort
 			out = append(out, d)
+		case "rtorrent":
+			d := engine.NewRtorrentDriver()
+			d.Image = rtImage
+			d.HostSCGIPort = rtSCGIPort
+			d.HostListenPort = rtListenPort
+			out = append(out, d)
 		case "":
 			continue
 		default:
-			return nil, fmt.Errorf("unknown engine %q (supported: typhon, rqbit, transmission, libtorrent, rain)", name)
+			return nil, fmt.Errorf("unknown engine %q (supported: typhon, rqbit, transmission, libtorrent, rain, rtorrent)", name)
 		}
 	}
 	if len(out) == 0 {
