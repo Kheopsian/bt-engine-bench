@@ -114,7 +114,7 @@ peexenabled: %t
 func (d *RainDriver) waitReady(ctx context.Context, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if _, err := d.call(ctx, "Session.GetSessionStats", []interface{}{struct{}{}}); err == nil {
+		if _, err := d.call(ctx, "Session.GetSessionStats", struct{}{}); err == nil {
 			return nil
 		}
 		select {
@@ -143,7 +143,11 @@ func (d *RainDriver) call(ctx context.Context, method string, params interface{}
 	if err != nil {
 		return nil, err
 	}
+	// powerman/rpc-codec/jsonrpc2 server requires BOTH headers — without
+	// Accept it returns 415. The Content-Type-only convention used by
+	// most JSON-RPC servers does NOT apply here.
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
 	resp, err := d.httpc.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("rain: rpc post: %w", err)
@@ -174,19 +178,15 @@ func (d *RainDriver) AddTorrent(ctx context.Context, t TorrentSpec) error {
 	// the engine's global DataDir. We accept t.SavePath silently;
 	// downstream tooling that compares directories needs to look
 	// under DataDir.
-	_, err := d.call(ctx, "Session.AddTorrent", []interface{}{
-		map[string]interface{}{
-			"Torrent": base64.StdEncoding.EncodeToString(t.MetaBytes),
-			"Stopped": false,
-		},
+	_, err := d.call(ctx, "Session.AddTorrent", map[string]interface{}{
+		"Torrent": base64.StdEncoding.EncodeToString(t.MetaBytes),
+		"Stopped": false,
 	})
 	return err
 }
 
 func (d *RainDriver) StartTorrent(ctx context.Context, infoHash string) error {
-	_, err := d.call(ctx, "Session.StartTorrent", []interface{}{
-		map[string]interface{}{"ID": infoHash},
-	})
+	_, err := d.call(ctx, "Session.StartTorrent", map[string]interface{}{"ID": infoHash})
 	return err
 }
 
@@ -204,7 +204,7 @@ type rainSessionStatsResp struct {
 }
 
 func (d *RainDriver) Stats(ctx context.Context) (Stats, error) {
-	raw, err := d.call(ctx, "Session.GetSessionStats", []interface{}{struct{}{}})
+	raw, err := d.call(ctx, "Session.GetSessionStats", struct{}{})
 	if err != nil {
 		return Stats{}, err
 	}
