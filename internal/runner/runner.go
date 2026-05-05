@@ -71,6 +71,11 @@ func Run(ctx context.Context, sc *scenario.Scenario, drivers []engine.Driver, wo
 		payloadPath string
 		torrentName string
 		seeders     map[string]bool
+		// verify mirrors SwarmEntry.Verify — when true the runner
+		// stages the payload to seeder data dirs but passes Seed=false
+		// to AddTorrent so the engine has to hash-check the data
+		// before going live.
+		verify bool
 	}
 	var artefacts []swarmArtefact
 	for i, sw := range sc.Swarm {
@@ -102,6 +107,7 @@ func Run(ctx context.Context, sc *scenario.Scenario, drivers []engine.Driver, wo
 				payloadPath: payloadPath,
 				torrentName: torrentName,
 				seeders:     seeders,
+				verify:      sw.Verify,
 			})
 		}
 		if quiet {
@@ -189,7 +195,10 @@ func Run(ctx context.Context, sc *scenario.Scenario, drivers []engine.Driver, wo
 					log.Printf("runner: staged seed for %s at %s", r.driver.Name(), dst)
 				}
 			}
-			if err := addOneWithSeed(ctx, r.driver, r.dataDir, art.entry, isSeeder); err != nil {
+			// art.verify decouples staging from seed_mode: stage the
+			// payload (seeders side) but force a verify on add (Seed=false).
+			seedFlag := isSeeder && !art.verify
+			if err := addOneWithSeed(ctx, r.driver, r.dataDir, art.entry, seedFlag); err != nil {
 				return err
 			}
 		}

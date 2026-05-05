@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -212,6 +213,71 @@ func runCompare(args []string) {
 
 // buildDrivers translates the --engines flag into concrete Driver values,
 // returning a stable error message if the user asked for an unknown name.
+// instancedDriver wraps a Driver and overrides Name() so two drivers of
+// the same kind (e.g. two typhon instances) report distinct identities
+// to the runner and the metrics CSV. Used for self-vs-self benches like
+// "typhon-0 seeds, typhon-1 leeches" where 1v1 measurements with two
+// different engine kinds would conflate per-engine bottlenecks.
+type instancedDriver struct {
+	engine.Driver
+	name string
+}
+
+func (d *instancedDriver) Name() string { return d.name }
+
+// instancedSeederDriver is the variant for drivers that ALSO implement
+// engine.Seeder. We use this two-type split because Go interface satisfaction
+// is checked structurally at type-assertion time: embedding only an
+// engine.Driver hides the inner Seeder methods, so the runner's
+// `driver.(engine.Seeder)` check would fail and seed staging would be
+// silently skipped (every multi-instance run would race two leechers).
+type instancedSeederDriver struct {
+	inner engine.Driver
+	name  string
+}
+
+func (d *instancedSeederDriver) Name() string { return d.name }
+func (d *instancedSeederDriver) Start(ctx context.Context, cfg engine.StartConfig) error {
+	return d.inner.Start(ctx, cfg)
+}
+func (d *instancedSeederDriver) AddTorrent(ctx context.Context, t engine.TorrentSpec) error {
+	return d.inner.AddTorrent(ctx, t)
+}
+func (d *instancedSeederDriver) StartTorrent(ctx context.Context, infoHash string) error {
+	return d.inner.StartTorrent(ctx, infoHash)
+}
+func (d *instancedSeederDriver) Stats(ctx context.Context) (engine.Stats, error) {
+	return d.inner.Stats(ctx)
+}
+func (d *instancedSeederDriver) Stop(ctx context.Context) error { return d.inner.Stop(ctx) }
+func (d *instancedSeederDriver) SeedPath(savePath, torrentName string) string {
+	return d.inner.(engine.Seeder).SeedPath(savePath, torrentName)
+}
+
+// wrapInstance returns the right wrapper depending on whether `d` also
+// implements Seeder, so the runner's interface assertions still work.
+func wrapInstance(d engine.Driver, name string) engine.Driver {
+	if _, ok := d.(engine.Seeder); ok {
+		return &instancedSeederDriver{inner: d, name: name}
+	}
+	return &instancedDriver{Driver: d, name: name}
+}
+
+// parseEngineSpec parses one --engines token. Accepts:
+//   - "rqbit"        → ("rqbit", 1)
+//   - "typhon:3"     → ("typhon", 3)
+func parseEngineSpec(spec string) (string, int, error) {
+	parts := strings.SplitN(spec, ":", 2)
+	if len(parts) == 1 {
+		return parts[0], 1, nil
+	}
+	n, err := strconv.Atoi(parts[1])
+	if err != nil || n < 1 {
+		return "", 0, fmt.Errorf("invalid instance count in %q: must be positive integer", spec)
+	}
+	return parts[0], n, nil
+}
+
 func buildDrivers(
 	list, typhonBin string,
 	rqbitImage string, rqbitAPIPort, rqbitListenPort int,
@@ -221,43 +287,62 @@ func buildDrivers(
 	rtImage string, rtSCGIPort, rtListenPort int,
 ) ([]engine.Driver, error) {
 	var out []engine.Driver
-	for _, name := range strings.Split(list, ",") {
-		name = strings.TrimSpace(name)
-		switch name {
-		case "typhon":
-			out = append(out, engine.NewTyphonDriver(typhonBin))
-		case "rqbit":
-			d := engine.NewRqbitDriver()
-			d.Image = rqbitImage
-			d.HostAPIPort = rqbitAPIPort
-			d.HostListenPort = rqbitListenPort
-			out = append(out, d)
-		case "transmission":
-			d := engine.NewTransmissionDriver()
-			d.Image = trImage
-			d.HostPort = trAPIPort
-			d.HostListenPort = trListenPort
-			out = append(out, d)
-		case "libtorrent":
-			d := engine.NewQbitDriver()
-			d.Image = qbImage
-			d.HostPort = qbAPIPort
-			d.HostListenPort = qbListenPort
-			out = append(out, d)
-		case "rain":
-			d := engine.NewRainDriver(rainBin)
-			d.HostRPCPort = rainRPCPort
-			out = append(out, d)
-		case "rtorrent":
-			d := engine.NewRtorrentDriver()
-			d.Image = rtImage
-			d.HostSCGIPort = rtSCGIPort
-			d.HostListenPort = rtListenPort
-			out = append(out, d)
-		case "":
+	for _, spec := range strings.Split(list, ",") {
+		spec = strings.TrimSpace(spec)
+		if spec == "" {
 			continue
-		default:
-			return nil, fmt.Errorf("unknown engine %q (supported: typhon, rqbit, transmission, libtorrent, rain, rtorrent)", name)
+		}
+		name, count, err := parseEngineSpec(spec)
+		if err != nil {
+			return nil, err
+		}
+		for inst := 0; inst < count; inst++ {
+			// Per-instance host-port offset keeps multiple containers of the
+			// same engine kind from binding the same port. Step by 100 leaves
+			// room for engines that grab a couple of contiguous ports.
+			off := inst * 100
+			var d engine.Driver
+			switch name {
+			case "typhon":
+				d = engine.NewTyphonDriver(typhonBin)
+			case "rqbit":
+				rd := engine.NewRqbitDriver()
+				rd.Image = rqbitImage
+				rd.HostAPIPort = rqbitAPIPort + off
+				rd.HostListenPort = rqbitListenPort + off
+				d = rd
+			case "transmission":
+				td := engine.NewTransmissionDriver()
+				td.Image = trImage
+				td.HostPort = trAPIPort + off
+				td.HostListenPort = trListenPort + off
+				d = td
+			case "libtorrent":
+				qd := engine.NewQbitDriver()
+				qd.Image = qbImage
+				qd.HostPort = qbAPIPort + off
+				qd.HostListenPort = qbListenPort + off
+				d = qd
+			case "rain":
+				rd := engine.NewRainDriver(rainBin)
+				rd.HostRPCPort = rainRPCPort + off
+				d = rd
+			case "rtorrent":
+				rd := engine.NewRtorrentDriver()
+				rd.Image = rtImage
+				rd.HostSCGIPort = rtSCGIPort + off
+				rd.HostListenPort = rtListenPort + off
+				d = rd
+			default:
+				return nil, fmt.Errorf("unknown engine %q (supported: typhon, rqbit, transmission, libtorrent, rain, rtorrent)", name)
+			}
+			// Only wrap when the user asked for >1 instance: a single-instance
+			// run keeps the legacy short name ("typhon" not "typhon-0") so
+			// existing scenario.seeders entries stay unchanged.
+			if count > 1 {
+				d = wrapInstance(d, fmt.Sprintf("%s-%d", name, inst))
+			}
+			out = append(out, d)
 		}
 	}
 	if len(out) == 0 {

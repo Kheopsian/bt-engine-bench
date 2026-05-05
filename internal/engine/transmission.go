@@ -66,15 +66,18 @@ func NewTransmissionDriver() *TransmissionDriver {
 
 func (d *TransmissionDriver) Name() string { return "transmission" }
 
-// SeedPath implements engine.Seeder. transmission rechecks files on add
-// when it sees data already in /downloads/<name>; the volume mapping
-// /downloads → DataDir makes the staged file visible.
+// SeedPath implements engine.Seeder. transmission's torrent-add
+// download-dir is the per-torrent SavePath translated to /downloads/<rel>
+// inside the container. The stage location must match that path exactly,
+// otherwise transmission verifies an empty area, decides it has 0 bytes,
+// and the seeder side never serves anything to its peers.
+//
+// Earlier this returned `DataDir/torrentName` (no /swarm subdir), so
+// transmission self-pair stayed stuck at peersConnected=0 +
+// haveValid=0 + status=4 (Downloading) for both instances — they were
+// both trying to download from each other but neither had data.
 func (d *TransmissionDriver) SeedPath(savePath, torrentName string) string {
-	_ = savePath
-	// transmission's download-dir is /downloads inside the container.
-	// We mount DataDir at /downloads, so the on-host path the engine
-	// reads is DataDir/<torrent_name>.
-	return d.cfg.DataDir + "/" + torrentName
+	return filepath.Join(savePath, torrentName)
 }
 
 func (d *TransmissionDriver) Start(ctx context.Context, cfg StartConfig) error {
@@ -90,18 +93,33 @@ func (d *TransmissionDriver) Start(ctx context.Context, cfg StartConfig) error {
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		return fmt.Errorf("transmission: mkdir cfg: %w", err)
 	}
+	// Per-instance loopback alias avoids transmission's self-loop filter
+	// in self-pair benches: when two transmissions both announce 127.0.0.1
+	// the receiver of the announce reply treats the other as itself and
+	// refuses to connect (peersConnected stays at 0 forever). Each
+	// instance announces a unique 127.0.X.1 address derived from its
+	// listen port; the kernel routes 127.0.0.0/8 entirely to lo so the
+	// actual TCP still works without extra routing setup.
+	bindOctet := (cfg.ListenPort - 17000) + 1
+	if bindOctet < 1 || bindOctet > 254 {
+		bindOctet = 1
+	}
+	bindIP := fmt.Sprintf("127.0.%d.1", bindOctet)
 	settings := fmt.Sprintf(`{
   "rpc-bind-address": "0.0.0.0",
   "rpc-port": %d,
   "rpc-whitelist-enabled": false,
   "peer-port": %d,
   "peer-port-random-on-start": false,
+  "bind-address-ipv4": "%s",
+  "announce-ip-enabled": true,
+  "announce-ip": "%s",
   "download-dir": "/downloads",
   "dht-enabled": %t,
   "pex-enabled": %t,
   "lpd-enabled": %t
 }
-`, d.HostPort, cfg.ListenPort, !cfg.DisableDHT, !cfg.DisablePEX, !cfg.DisableLSD)
+`, d.HostPort, cfg.ListenPort, bindIP, bindIP, !cfg.DisableDHT, !cfg.DisablePEX, !cfg.DisableLSD)
 	if err := os.WriteFile(configDir+"/settings.json", []byte(settings), 0o644); err != nil {
 		return fmt.Errorf("transmission: write settings.json: %w", err)
 	}

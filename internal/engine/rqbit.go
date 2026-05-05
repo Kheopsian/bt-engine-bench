@@ -134,13 +134,17 @@ func (d *RqbitDriver) AddTorrent(ctx context.Context, t TorrentSpec) error {
 	// binary, OR a magnet/URL/path string. We post raw bytes for
 	// simplicity and so the test harness does not have to materialise
 	// a file on the shared volume just to add a torrent.
-	url := d.baseURL + "/torrents"
+	// overwrite=true lets rqbit reuse pre-staged payload files (verify
+	// scenarios stage data on disk before AddTorrent and rely on the
+	// engine to hash-check it instead of re-downloading). Without this,
+	// rqbit refuses with "File exists (os error 17)".
+	url := d.baseURL + "/torrents?overwrite=true"
 	if t.SavePath != "" {
 		// Output folder is overridable per-torrent via a query param.
 		// Mapped through the container mount.
 		rel, err := filepath.Rel(d.cfg.DataDir, t.SavePath)
 		if err == nil && !strings.HasPrefix(rel, "..") {
-			url += "?output_folder=" + filepath.Join("/data", rel)
+			url += "&output_folder=" + filepath.Join("/data", rel)
 		}
 	}
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(t.MetaBytes))

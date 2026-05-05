@@ -181,6 +181,16 @@ func (d *QbitDriver) AddTorrent(ctx context.Context, t TorrentSpec) error {
 	if err := mw.WriteField("paused", "false"); err != nil {
 		return err
 	}
+	// Forward Seed flag → skip qBit's hash check on add. With pre-staged
+	// payload (seeders in scenario), the leecher pair would otherwise
+	// wait the full verify duration (~10 MB/s, ~7 min on a 4 GB file)
+	// before the engine becomes a peer-visible seeder. qBit's WebUI param
+	// for this is `skip_checking=true`.
+	if t.Seed {
+		if err := mw.WriteField("skip_checking", "true"); err != nil {
+			return err
+		}
+	}
 
 	// File part. Use a stable filename so qBit's logs are grep-able.
 	hdr := make(textproto.MIMEHeader)

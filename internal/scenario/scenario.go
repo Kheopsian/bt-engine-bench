@@ -92,6 +92,15 @@ type SwarmEntry struct {
 	// list start empty and have to download. Empty seeders means
 	// nobody seeds — the swarm will sit idle.
 	Seeders []string `json:"seeders"`
+
+	// Verify, when true, forces engines listed in Seeders to verify
+	// the staged payload against the torrent's piece hashes instead of
+	// trusting it (Seed=false on AddTorrent). Used by verify-storm
+	// scenarios that simulate cold restart with N torrents already on
+	// disk: the engine sees the files but has to read+hash them all
+	// before it can serve them. typhon and libtorrent both honour
+	// this; engines that ignore Seed always verify regardless.
+	Verify bool `json:"verify"`
 }
 
 // TorrentEntry describes one torrent the harness should hand to each engine.
