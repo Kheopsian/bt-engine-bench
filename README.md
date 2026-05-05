@@ -40,19 +40,26 @@ documented in the source comments matches what the engine actually emits.
 - Built-in BEP-3 HTTP tracker handles real announces from real engines
 - Torrent generator builds valid `.torrent` files (round-tripped through rqbit)
 - **All 6 engines transfer data** end-to-end in the same swarm.
-  Reference 6-engine run (typhon seeds 50 MiB to five leechers, 180 s
-  duration): every leecher reaches the full payload, and rqbit + typhon
-  both re-upload to other peers in the swarm.
+  Reference 6-engine run (typhon seeds 5 GiB to five leechers, 180 s,
+  `scenarios/dlrace-5g.json`): every leecher reaches the full payload
+  and four of the five re-upload via cascade.
 
 ```
-engine          UL total      DL total
-typhon         157.3 MiB         0.0 B    ← seeder (served 3 leechers directly)
-rqbit           50.0 MiB      50.0 MiB    ← re-upload to swarm
-rain                0.0 B     50.0 MiB
-libtorrent          0.0 B     50.0 MiB
-rtorrent        50.1 MiB      50.2 MiB    ← also seeded back after completion
-transmission        0.0 B     50.0 MiB
+engine        peak DL rate   final DL    final UL
+typhon              0 B/s        0 B    11.76 GiB    ← seeder
+rqbit         613 MB/s         5.0 GiB         0 B
+rain           51 MB/s         5.0 GiB     5.4 GiB    ← re-upload
+libtorrent    198 MB/s         5.0 GiB         0 B
+rtorrent       90 MB/s         5.0 GiB     4.4 GiB    ← re-upload
+transmission   63 MB/s         5.0 GiB     5.4 GiB    ← re-upload
 ```
+
+Self-pair benches (same engine seeder + leecher, via
+`--engines name:2`) work for typhon, rqbit, rtorrent. libtorrent and
+transmission have engine-side anti-loopback / "skip-checking activates
+seed mode" quirks we couldn't fully work around — for those two,
+mixed-swarm benches (single neutral seeder + the engine as leecher) are
+the methodology of choice.
 
 Caveat: rtorrent is the slowest engine to boot + announce, so short
 scenarios (≤ 60 s) will frequently show it stuck at zero bytes simply
@@ -93,13 +100,37 @@ numbers in `docs/hoard-rss-summary.csv`.
 
 **Pending** (PRs welcome):
 
-- `seed_mode` is wired through `TorrentSpec.Seed` and honoured by
-  typhon. libtorrent (qbit-nox) has the same flag and just needs the
-  driver to forward it.
+- libtorrent (qbit-nox) self-pair leaves the seeder side stuck at
+  status=Downloading even with `skip_checking=true` in torrent-add. The
+  WebUI flag is forwarded but qBit doesn't transition to active seeding
+  on its own — likely needs an extra `setForceStart` or per-torrent
+  resume call after add.
+- transmission self-pair: tracker-discovered peers never connect even
+  after assigning each instance a unique 127.0.X.1 bind-address +
+  matching announce-ip (anti-self-loop check looks deeper than
+  `bind-address-ipv4`). Today the driver works fine in mixed swarms.
 - Multi-engine swarms could converge faster if the runner waited for
   every engine's BT listen socket to be live before kicking off Phase 2
   announces, instead of relying on each driver's own readiness
   heuristic.
+
+## Multi-instance scenarios (engine:N)
+
+`--engines name:N` spawns N copies of the same engine with non-colliding
+host ports (`+100/instance`) and per-instance names (`name-0`, `name-1`,
+...). The scenario references those instance names in `seeders`:
+
+```sh
+./bench compare --engines typhon:2 --scenario scenarios/self-pair.json ...
+```
+```json
+"swarm": [{ "payload_size": 1073741824, "seeders": ["typhon-0"] }]
+```
+
+`typhon-0` stages the file and serves; `typhon-1` leeches from it. Useful
+for isolating per-engine throughput without the bottleneck-of-the-couple
+ambiguity that 1-vs-1 cross-engine benches have ("did the bench measure
+my seeder's UL or the leecher's DL?").
 
 ## Quick start
 
